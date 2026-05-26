@@ -200,6 +200,13 @@ const hasAdminOrEditorAccess = async (orgId, userId) => {
 const checkApprovalBypass = async (orgId, userId) => {
   const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { approvalPolicy: true, whitelistedUserIds: true, isPersonal: true } });
   if (!org || org.isPersonal) return true; // Personal orgs always bypass
+  
+  // Admins bypass approval by default
+  const membership = await prisma.organizationMember.findUnique({
+    where: { userId_organizationId: { userId, organizationId: orgId } }
+  });
+  if (membership && membership.role === 'admin') return true;
+  
   if (org.approvalPolicy === 'GLOBALLY_OFF') return true;
   if (org.approvalPolicy === 'CONDITIONAL_ON' && (org.whitelistedUserIds || []).includes(userId)) return true;
   return false; // GLOBALLY_ON or CONDITIONAL_ON but not whitelisted
@@ -311,11 +318,13 @@ async function enrichTxn(txn) {
     fundName = linkedTxn?.book?.organization?.name || null;
   }
   let creatorName = null;
+  let creatorAvatarUrl = null;
   if (txn.createdById) {
-    const u = await prisma.user.findUnique({ where: { id: txn.createdById }, select: { name: true } });
+    const u = await prisma.user.findUnique({ where: { id: txn.createdById }, select: { name: true, avatarUrl: true } });
     creatorName = u?.name || null;
+    creatorAvatarUrl = u?.avatarUrl || null;
   }
-  return { ...txn, recipientName, fundName, creatorName, chainId: txn.chainId, chainType: txn.chainType, isLiability: txn.isLiability, adjustedAmount: txn.adjustedAmount };
+  return { ...txn, recipientName, fundName, creatorName, creatorAvatarUrl, chainId: txn.chainId, chainType: txn.chainType, isLiability: txn.isLiability, adjustedAmount: txn.adjustedAmount };
 }
 
 // --- AUTH ROUTES ---
@@ -1066,8 +1075,9 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
 
     // Personal org — edit directly, no pending/approval flow needed
     const editOrg = await prisma.organization.findUnique({ where: { id: book.organizationId }, select: { isPersonal: true } });
-    if (editOrg?.isPersonal) {
-      // Personal book: direct update, balance adjusted, no approval needed
+    const isManualIncome = txn.type === 'income' && !txn.linkedTransactionId;
+    if (editOrg?.isPersonal || isManualIncome) {
+      // Personal book or manual income: direct update, balance adjusted, no approval needed
       let personalBalAdj = 0;
       if (changes.amount !== undefined && changes.amount !== txn.amount) {
         if (txn.type === 'expense') personalBalAdj = txn.amount - parsedAmount;
@@ -1102,6 +1112,7 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
         oldCategory: txn.category,
         oldNote: txn.note,
         oldRecipientUserId: txn.recipientUserId,
+        requestedBy: req.user.id,
       };
 
       // Update transaction: apply changes, set to pending
@@ -1162,6 +1173,7 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
                   oldType: linkedTxn.type,
                   oldCategory: linkedTxn.category,
                   oldNote: linkedTxn.note,
+                  requestedBy: req.user.id,
                 },
                 updateHistory: [
                   ...(linkedTxn.updateHistory || []),
@@ -1371,9 +1383,10 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
 
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true } });
 
-    // C3: Personal org — hard-delete immediately, no pending flow
+    // C3: Personal org or manual income — hard-delete immediately, no pending flow
     const org = await prisma.organization.findUnique({ where: { id: book.organizationId }, select: { isPersonal: true } });
-    if (org?.isPersonal) {
+    const isManualIncome = txn.type === 'income' && !txn.linkedTransactionId;
+    if (org?.isPersonal || isManualIncome) {
       await prisma.$transaction(async (prisma) => {
         let balanceAdjustment = 0;
         if (txn.type === 'expense') {
@@ -1422,6 +1435,7 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
         oldRecipientUserId: txn.recipientUserId,
         oldLinkedTransactionId: txn.linkedTransactionId,
         oldOrgFundId: txn.orgFundId,
+        requestedBy: req.user.id,
       };
 
       await prisma.$transaction(async (prisma) => {
@@ -1477,6 +1491,7 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
                   oldType: linkedTxn.type,
                   oldCategory: linkedTxn.category,
                   oldNote: linkedTxn.note,
+                  requestedBy: req.user.id,
                 },
                 updateHistory: [
                   ...(linkedTxn.updateHistory || []),
@@ -1571,6 +1586,30 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
     );
     if (!isRecipient && !(await hasAdminOrEditorAccess(txnBook.organizationId, req.user.id))) {
       return res.status(403).json({ error: 'Only admins, editors, or the recipient can approve/reject transactions' });
+    }
+
+    // 1. Check if this is an edit/delete request and the requester is trying to approve/reject it.
+    if (txn.pendingAction && ['edit', 'delete'].includes(txn.pendingAction)) {
+      const pendingDataObj = txn.pendingData ? (typeof txn.pendingData === 'string' ? JSON.parse(txn.pendingData) : txn.pendingData) : {};
+      if (pendingDataObj.requestedBy === req.user.id) {
+        return res.status(403).json({ error: 'You cannot approve or reject your own edit/delete request. The other party must approve it.' });
+      }
+    }
+
+    // 2. Check if this is a pending_recipient creation step and the caller is NOT the recipient.
+    if (action === 'approve' && txn.reconStatus === 'pending_recipient') {
+      let recipientUserId = null;
+      if (txn.type === 'expense' && txn.category === 'Send') {
+        recipientUserId = txn.recipientUserId;
+      } else if (txn.linkedTransactionId) {
+        const linked = await prisma.transaction.findUnique({ where: { id: txn.linkedTransactionId } });
+        if (linked && linked.type === 'expense' && linked.category === 'Send') {
+          recipientUserId = linked.recipientUserId;
+        }
+      }
+      if (!recipientUserId || req.user.id !== recipientUserId) {
+        return res.status(403).json({ error: 'Only the recipient of the transfer can accept/approve it.' });
+      }
     }
 
     // --- REJECT MODIFICATION (sender rejects recipient's proposed change) ---
@@ -1680,10 +1719,10 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
         } else if (txn.pendingAction === 'delete') {
           await prisma.$transaction(async (tx) => {
             if (txn.linkedTransactionId) {
-              await tx.transaction.update({
-                where: { id: txn.linkedTransactionId },
-                data: { linkedTransactionId: null }
-              });
+              const linked = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId } });
+              if (linked) {
+                await tx.transaction.delete({ where: { id: linked.id } });
+              }
             }
             await tx.transaction.delete({ where: { id: txnId } });
           });
@@ -2207,11 +2246,13 @@ app.get('/api/transactions/:bookId', authenticateToken, async (req, res) => {
         fundName = linkedTxn?.book?.organization?.name || null;
       }
       let creatorName = null;
+      let creatorAvatarUrl = null;
       if (txn.createdById) {
-        const u = await prisma.user.findUnique({ where: { id: txn.createdById }, select: { name: true } });
+        const u = await prisma.user.findUnique({ where: { id: txn.createdById }, select: { name: true, avatarUrl: true } });
         creatorName = u?.name || null;
+        creatorAvatarUrl = u?.avatarUrl || null;
       }
-      return { ...txn, recipientName, fundName, creatorName, chainId: txn.chainId, chainType: txn.chainType, isLiability: txn.isLiability, adjustedAmount: txn.adjustedAmount };
+      return { ...txn, recipientName, fundName, creatorName, creatorAvatarUrl, chainId: txn.chainId, chainType: txn.chainType, isLiability: txn.isLiability, adjustedAmount: txn.adjustedAmount };
     }));
 
     res.json(enriched);
@@ -2621,8 +2662,8 @@ app.post('/api/org/:orgId/categories', authenticateToken, async (req, res) => {
     const membership = await prisma.organizationMember.findUnique({
       where: { userId_organizationId: { userId: req.user.id, organizationId: req.params.orgId } }
     });
-    if (!membership || membership.status !== 'active' || (membership.role !== 'admin' && !(membership.permissions || []).includes('manage_categories'))) {
-      return res.status(403).json({ error: 'Only admins or users with manage_categories permission can manage categories' });
+    if (!membership || membership.status !== 'active' || (membership.role !== 'admin' && !(membership.permissions || []).includes('manage_categories') && !(membership.permissions || []).includes('manage_settings'))) {
+      return res.status(403).json({ error: 'Only admins or users with manage_settings permission can manage categories' });
     }
 
     const org = await prisma.organization.findUnique({
@@ -2659,8 +2700,8 @@ app.delete('/api/org/:orgId/categories', authenticateToken, async (req, res) => 
     const membership = await prisma.organizationMember.findUnique({
       where: { userId_organizationId: { userId: req.user.id, organizationId: req.params.orgId } }
     });
-    if (!membership || membership.status !== 'active' || (membership.role !== 'admin' && !(membership.permissions || []).includes('manage_categories'))) {
-      return res.status(403).json({ error: 'Only admins or users with manage_categories permission can manage categories' });
+    if (!membership || membership.status !== 'active' || (membership.role !== 'admin' && !(membership.permissions || []).includes('manage_categories') && !(membership.permissions || []).includes('manage_settings'))) {
+      return res.status(403).json({ error: 'Only admins or users with manage_settings permission can manage categories' });
     }
 
     const org = await prisma.organization.findUnique({
@@ -2722,7 +2763,7 @@ app.patch('/api/org/:orgId/members/:memberId/permissions', authenticateToken, as
       return res.status(400).json({ error: 'Permissions must be an array' });
     }
 
-    const validPermissions = ['view_books', 'add_expense', 'add_income', 'edit_all', 'manage_categories', 'manage_members'];
+    const validPermissions = ['view_books', 'add_expense', 'add_income', 'edit_all', 'manage_categories', 'manage_members', 'manage_settings'];
     for (const p of permissions) {
       if (!validPermissions.includes(p)) {
         return res.status(400).json({ error: `Invalid permission: ${p}` });
@@ -2831,7 +2872,7 @@ app.put('/api/org/:orgId', authenticateToken, async (req, res) => {
     const org = await prisma.organization.findUnique({ where: { id: orgId } });
     if (!org) return res.status(404).json({ error: 'Organization not found' });
 
-    // Verify user is an admin of the organization
+    // Verify user is an admin or has manage_settings permission
     const membership = await prisma.organizationMember.findUnique({
       where: {
         userId_organizationId: {
@@ -2840,8 +2881,8 @@ app.put('/api/org/:orgId', authenticateToken, async (req, res) => {
         }
       }
     });
-    if (!membership || membership.role !== 'admin') {
-      return res.status(403).json({ error: 'Only admins can update organization settings' });
+    if (!membership || (membership.role !== 'admin' && !(membership.permissions || []).includes('manage_settings'))) {
+      return res.status(403).json({ error: 'Only admins or users with manage_settings permission can update organization settings' });
     }
 
     const updateData = {};
