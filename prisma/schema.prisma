@@ -88,6 +88,7 @@ model Transaction {
   category            String?
   contact             String?
   recipientUserId     String?
+  recipientOrgId      String?
   linkedTransactionId String?
   orgFundId           String?
   imageUrl            String?
