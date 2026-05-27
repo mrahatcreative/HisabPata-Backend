@@ -3847,6 +3847,54 @@ app.get('/api/transactions/:bookId', authenticateToken, async (req, res) => {
 });
 
 // Get pending approvals/notifications across all user's orgs
+// --- AUDIO NOTES ENDPOINTS ---
+app.get('/api/audio-notes', authenticateToken, async (req, res) => {
+  try {
+    const notes = await prisma.audioNote.findMany({
+      where: { userId: req.user.id },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(notes);
+  } catch (err) {
+    console.error('Error fetching audio notes:', err);
+    res.status(500).json({ error: 'Server error fetching audio notes' });
+  }
+});
+
+app.post('/api/audio-notes', authenticateToken, async (req, res) => {
+  try {
+    const { audioUrl, text, recordedAt } = req.body;
+    const note = await prisma.audioNote.create({
+      data: {
+        userId: req.user.id,
+        audioUrl: audioUrl || null,
+        text: text || "Unprocessed Audio Note",
+        status: text ? 'processed' : 'pending',
+        recordedAt: recordedAt ? new Date(recordedAt) : new Date(),
+      }
+    });
+    res.status(201).json(note);
+  } catch (err) {
+    console.error('Error creating audio note:', err);
+    res.status(500).json({ error: 'Server error creating audio note' });
+  }
+});
+
+app.delete('/api/audio-notes/:id', authenticateToken, async (req, res) => {
+  try {
+    const noteId = req.params.id;
+    const note = await prisma.audioNote.findUnique({ where: { id: noteId } });
+    if (!note || note.userId !== req.user.id) {
+      return res.status(404).json({ error: 'Audio note not found' });
+    }
+    await prisma.audioNote.delete({ where: { id: noteId } });
+    res.json({ message: 'Deleted successfully' });
+  } catch (err) {
+    console.error('Error deleting audio note:', err);
+    res.status(500).json({ error: 'Server error deleting audio note' });
+  }
+});
+
 app.get('/api/approvals/pending', authenticateToken, async (req, res) => {
   try {
     const user = await prisma.user.findUnique({

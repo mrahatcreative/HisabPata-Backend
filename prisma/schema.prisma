@@ -20,6 +20,7 @@ model User {
   aiChatMessages AiChatMessage[]
   memberships  OrganizationMember[]
   complaints   Complaint[]
+  audioNotes   AudioNote[]
   createdAt    DateTime             @default(now())
 }
 
@@ -123,4 +124,15 @@ model Transaction {
   clientRef           String?
   book                Book     @relation(fields: [bookId], references: [id])
   createdAt           DateTime @default(now())
+}
+
+model AudioNote {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  audioUrl   String?  // the URL or path to the saved audio file
+  text       String?  // transcribed text
+  status     String   @default("pending") // pending, processed, error
+  recordedAt DateTime @default(now()) // When the user actually recorded it offline
+  createdAt  DateTime @default(now()) // When it was synced to server
 }
