@@ -51,10 +51,10 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit (large for videos)
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit
   fileFilter: (req, file, cb) => {
-    const filetypes = /jpeg|jpg|png|gif|webp|mp4|mov|avi|mkv|quicktime/;
-    const mimetype = filetypes.test(file.mimetype);
+    const filetypes = /jpeg|jpg|png|gif|webp|mp4|mov|avi|mkv|quicktime|mp3|m4a|wav|aac|ogg|webm|x-m4a/;
+    const mimetype = filetypes.test(file.mimetype) || file.mimetype.includes('audio/');
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
 
     if (mimetype || extname) {
@@ -3858,6 +3858,69 @@ app.get('/api/audio-notes', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Error fetching audio notes:', err);
     res.status(500).json({ error: 'Server error fetching audio notes' });
+  }
+});
+
+app.post('/api/audio-notes/upload', authenticateToken, upload.single('audio'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No audio file provided' });
+    
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user || !user.aiConfig) {
+      return res.status(400).json({ error: 'AI config (API Key) not found for user' });
+    }
+    
+    const aiConfig = typeof user.aiConfig === 'string' ? JSON.parse(user.aiConfig) : user.aiConfig;
+    const apiKey = aiConfig.apiKey;
+    if (!apiKey) return res.status(400).json({ error: 'Gemini API Key is missing in settings' });
+
+    // Read the file as base64
+    const audioData = fs.readFileSync(req.file.path).toString('base64');
+    const mimeType = req.file.mimetype || 'audio/m4a';
+
+    // Transcribe via Gemini
+    const geminiUrl = \`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=\${apiKey}\`;
+    const aiReqBody = {
+      contents: [{
+        parts: [
+          { text: "Listen to this audio and perfectly transcribe exactly what is spoken. If it is in Bengali, write in Bengali text. DO NOT add any extra commentary or formatting, just output the raw text." },
+          { inlineData: { mimeType: mimeType, data: audioData } }
+        ]
+      }],
+      generationConfig: { temperature: 0.2 }
+    };
+
+    const aiRes = await fetch(geminiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(aiReqBody)
+    });
+
+    let transcribedText = "Unclear audio / Processing failed";
+    if (aiRes.ok) {
+      const aiData = await aiRes.json();
+      if (aiData.candidates && aiData.candidates[0]?.content?.parts) {
+        transcribedText = aiData.candidates[0].content.parts[0].text.trim();
+      }
+    } else {
+      console.error('Gemini API Error:', await aiRes.text());
+    }
+
+    const audioUrl = \`/uploads/\${req.file.filename}\`;
+    const note = await prisma.audioNote.create({
+      data: {
+        userId: user.id,
+        audioUrl: audioUrl,
+        text: transcribedText,
+        status: transcribedText.includes('Unclear audio') ? 'pending' : 'processed',
+        recordedAt: new Date(req.body.recordedAt || Date.now()),
+      }
+    });
+    
+    res.status(201).json(note);
+  } catch (err) {
+    console.error('Error processing audio note:', err);
+    res.status(500).json({ error: 'Server error processing audio' });
   }
 });
 
