@@ -14,57 +14,81 @@ const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
 const { Readable } = require('stream');
+const crypto = require('crypto');
 
-// ─── SeaweedFS Filer Storage ───────────────────────────────────────────────
-// Set SEAWEEDFS_FILER=http://your-server:8888 in .env to enable.
-// Files will be stored in organized folders under /hisabpata/ on Filer.
-// If not set, files are stored locally in /uploads as fallback.
-const seaweedFiler = process.env.SEAWEEDFS_FILER ? process.env.SEAWEEDFS_FILER.replace(/\/$/, '') : '';
-const useSeaweed = !!seaweedFiler;
-const seaweedAppDir = process.env.SEAWEEDFS_DIR || 'hisabpata';
+// ─── S3-Compatible Object Storage (SeaweedFS S3 / MinIO / Cloudflare R2) ─────
+// Set STORAGE_S3_ENDPOINT in .env to enable. Falls back to local /uploads.
+// Folder structure under bucket:
+//   profile-pictures/  → user profile photos
+//   org-profile/       → organization logos
+//   vouchers/          → transaction/voucher attachments
+//   audio/             → voice notes
+//   files/             → generic fallback
+const s3Endpoint  = process.env.STORAGE_S3_ENDPOINT  ? process.env.STORAGE_S3_ENDPOINT.replace(/\/$/, '') : '';
+const s3Bucket    = process.env.STORAGE_S3_BUCKET    || 'hisabpata';
+const s3AccessKey = process.env.STORAGE_S3_ACCESS_KEY || '';
+const s3SecretKey = process.env.STORAGE_S3_SECRET_KEY || '';
+const s3Region    = process.env.STORAGE_S3_REGION     || 'us-east-1';
+const useS3       = !!s3Endpoint;
 
-// Allowed folder names (purpose-based, not file-type-based)
-// Callers pass the folder name explicitly via query param or form field.
-const SEAWEED_FOLDERS = {
-  'profile-pictures': 'profile-pictures', // user profile photos
-  'org-profile':      'org-profile',      // organization logos
-  'vouchers':         'vouchers',          // transaction / voucher attachments
-  'audio':            'audio',             // voice notes
-  'files':            'files',             // generic fallback
+const S3_FOLDERS = {
+  'profile-pictures': 'profile-pictures',
+  'org-profile':      'org-profile',
+  'vouchers':         'vouchers',
+  'audio':            'audio',
+  'files':            'files',
 };
 
-function resolveSeaweedFolder(requestedFolder, mimetype, filename) {
-  // If caller passed a valid explicit folder, use it
-  if (requestedFolder && SEAWEED_FOLDERS[requestedFolder]) return SEAWEED_FOLDERS[requestedFolder];
-  // Auto-detect audio
+function resolveS3Folder(requestedFolder, mimetype, filename) {
+  if (requestedFolder && S3_FOLDERS[requestedFolder]) return S3_FOLDERS[requestedFolder];
   if (!mimetype) mimetype = '';
   if (mimetype.startsWith('audio/') || /\.(m4a|mp3|wav|aac|ogg|opus)$/i.test(filename)) return 'audio';
-  // Default fallback
   return 'files';
 }
 
-// Upload a local file to SeaweedFS Filer. Returns the stored path (folder/filename).
-async function uploadToSeaweed(localPath, filename, mimetype, folder) {
-  if (!useSeaweed) return null;
+// AWS Signature V4 signing for S3 requests
+function signS3Request(method, key, contentType, body, date) {
+  if (!s3AccessKey || !s3SecretKey) return {}; // no-auth mode
+  const datetime = date.toISOString().replace(/[:-]|\.\d{3}/g, '').slice(0, 15) + 'Z';
+  const dateStr  = datetime.slice(0, 8);
+  const host     = new URL(s3Endpoint).host;
+  const bodyHash = crypto.createHash('sha256').update(body).digest('hex');
+  const canonicalHeaders = `content-type:${contentType}\nhost:${host}\nx-amz-content-sha256:${bodyHash}\nx-amz-date:${datetime}\n`;
+  const signedHeaders    = 'content-type;host;x-amz-content-sha256;x-amz-date';
+  const canonicalRequest = [method, `/${s3Bucket}/${key}`, '', canonicalHeaders, signedHeaders, bodyHash].join('\n');
+  const credentialScope  = `${dateStr}/${s3Region}/s3/aws4_request`;
+  const stringToSign     = `AWS4-HMAC-SHA256\n${datetime}\n${credentialScope}\n` +
+                            crypto.createHash('sha256').update(canonicalRequest).digest('hex');
+  const signingKey = ['aws4', s3SecretKey, dateStr, s3Region, 's3', 'aws4_request']
+    .reduce((key, data) => crypto.createHmac('sha256', key).update(data).digest());
+  const signature = crypto.createHmac('sha256', signingKey).update(stringToSign).digest('hex');
+  return {
+    'x-amz-date':           datetime,
+    'x-amz-content-sha256': bodyHash,
+    'Authorization': `AWS4-HMAC-SHA256 Credential=${s3AccessKey}/${credentialScope},SignedHeaders=${signedHeaders},Signature=${signature}`,
+  };
+}
+
+// Upload local file to S3. Returns stored key (folder/filename) or null.
+async function uploadToS3(localPath, filename, mimetype, folder) {
+  if (!useS3) return null;
   try {
-    const resolvedFolder = resolveSeaweedFolder(folder, mimetype, filename);
-    const filerPath = `/${seaweedAppDir}/${resolvedFolder}/${filename}`;
-
-    const fileBuffer = fs.readFileSync(localPath);
-    const uploadRes = await fetch(`${seaweedFiler}${filerPath}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': mimetype || 'application/octet-stream' },
-      body: fileBuffer
+    const resolvedFolder = resolveS3Folder(folder, mimetype, filename);
+    const key            = `${resolvedFolder}/${filename}`;
+    const contentType    = mimetype || 'application/octet-stream';
+    const fileBuffer     = fs.readFileSync(localPath);
+    const now            = new Date();
+    const authHeaders    = signS3Request('PUT', key, contentType, fileBuffer, now);
+    const uploadRes = await fetch(`${s3Endpoint}/${s3Bucket}/${key}`, {
+      method:  'PUT',
+      headers: { 'Content-Type': contentType, ...authHeaders },
+      body:    fileBuffer,
     });
-    if (!uploadRes.ok) throw new Error('Filer upload failed: ' + await uploadRes.text());
-
-    // Delete local temp file after successful upload
+    if (!uploadRes.ok) throw new Error('S3 upload failed: ' + await uploadRes.text());
     try { fs.unlinkSync(localPath); } catch (e) {}
-
-    // Return relative path stored in DB and used as proxy URL key
-    return `${resolvedFolder}/${filename}`;
+    return key; // e.g. "profile-pictures/1234567890-abc.jpg"
   } catch (error) {
-    console.error('[SeaweedFS Filer] Upload error:', error);
+    console.error('[S3 Storage] Upload error:', error);
     return null;
   }
 }
@@ -153,23 +177,38 @@ app.use(cors({
   credentials: !isCorsWildcard,
 }));
 app.use(express.json());
-// SeaweedFS Filer proxy: /uploads/category/filename → streams from Filer
-if (useSeaweed) {
-  app.get('/uploads/:category/:filename', async (req, res, next) => {
+// S3 proxy: /uploads/:folder/:filename → streams from S3 bucket
+if (useS3) {
+  app.get('/uploads/:folder/:filename', async (req, res, next) => {
     try {
-      const filerPath = `/${seaweedAppDir}/${req.params.category}/${req.params.filename}`;
-      const fileRes = await fetch(`${seaweedFiler}${filerPath}`);
+      const key     = `${req.params.folder}/${req.params.filename}`;
+      const now     = new Date();
+      const datetime = now.toISOString().replace(/[:-]|\.\d{3}/g, '').slice(0, 15) + 'Z';
+      const host    = new URL(s3Endpoint).host;
+      const bodyHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'; // empty
+      const headers = { 'x-amz-date': datetime, 'x-amz-content-sha256': bodyHash };
+      if (s3AccessKey && s3SecretKey) {
+        const dateStr = datetime.slice(0, 8);
+        const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${bodyHash}\nx-amz-date:${datetime}\n`;
+        const signedHeaders    = 'host;x-amz-content-sha256;x-amz-date';
+        const canonicalRequest = ['GET', `/${s3Bucket}/${key}`, '', canonicalHeaders, signedHeaders, bodyHash].join('\n');
+        const credentialScope  = `${dateStr}/${s3Region}/s3/aws4_request`;
+        const stringToSign     = `AWS4-HMAC-SHA256\n${datetime}\n${credentialScope}\n` +
+                                  crypto.createHash('sha256').update(canonicalRequest).digest('hex');
+        const signingKey = ['aws4', s3SecretKey, dateStr, s3Region, 's3', 'aws4_request']
+          .reduce((k, d) => crypto.createHmac('sha256', k).update(d).digest());
+        const signature = crypto.createHmac('sha256', signingKey).update(stringToSign).digest('hex');
+        headers['Authorization'] = `AWS4-HMAC-SHA256 Credential=${s3AccessKey}/${credentialScope},SignedHeaders=${signedHeaders},Signature=${signature}`;
+      }
+      const fileRes = await fetch(`${s3Endpoint}/${s3Bucket}/${key}`, { headers });
       if (!fileRes.ok) return next();
-
       const ct = fileRes.headers.get('content-type');
       const cl = fileRes.headers.get('content-length');
       if (ct) res.setHeader('Content-Type', ct);
       if (cl) res.setHeader('Content-Length', cl);
       res.setHeader('Cache-Control', 'public, max-age=31536000');
       Readable.fromWeb(fileRes.body).pipe(res);
-    } catch (e) {
-      next();
-    }
+    } catch (e) { next(); }
   });
 }
 app.use('/uploads', express.static(uploadDir));
@@ -248,10 +287,10 @@ app.post('/api/upload', authenticateToken, (req, res) => {
     }
 
     let fileUrl = `/uploads/${req.file.filename}`;
-    if (useSeaweed) {
+    if (useS3) {
       // Caller can pass ?folder=profile-pictures / org-profile / vouchers etc.
       const requestedFolder = req.query.folder || req.body?.folder || null;
-      const storedPath = await uploadToSeaweed(req.file.path, req.file.filename, req.file.mimetype, requestedFolder);
+      const storedPath = await uploadToS3(req.file.path, req.file.filename, req.file.mimetype, requestedFolder);
       if (storedPath) fileUrl = `/uploads/${storedPath}`;
     }
     res.json({ imageUrl: fileUrl });
@@ -4001,9 +4040,9 @@ app.post('/api/audio-notes/upload', authenticateToken, upload.single('audio'), a
     }
 
     let audioUrl = `/uploads/${req.file.filename}`;
-    if (useSeaweed) {
+    if (useS3) {
       // Audio notes always go to the 'audio' folder
-      const storedPath = await uploadToSeaweed(req.file.path, req.file.filename, req.file.mimetype, 'audio');
+      const storedPath = await uploadToS3(req.file.path, req.file.filename, req.file.mimetype, 'audio');
       if (storedPath) audioUrl = `/uploads/${storedPath}`;
     }
 
