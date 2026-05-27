@@ -1249,7 +1249,15 @@ app.post('/api/auth/register', async (req, res) => {
     });
   } catch (error) {
     console.error('Registration error:', error);
-    res.status(500).json({ error: 'Server error during registration' });
+    const hint = error?.code === 'P2022'
+      ? 'Database schema out of date — run: npx prisma migrate deploy'
+      : error?.code === 'P2002'
+        ? 'User with this email or phone already exists'
+        : null;
+    res.status(500).json({
+      error: hint || 'Server error during registration',
+      ...(process.env.NODE_ENV !== 'production' && error?.message ? { detail: error.message } : {}),
+    });
   }
 });
 
