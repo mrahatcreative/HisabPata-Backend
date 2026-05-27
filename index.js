@@ -23,21 +23,32 @@ const seaweedFiler = process.env.SEAWEEDFS_FILER ? process.env.SEAWEEDFS_FILER.r
 const useSeaweed = !!seaweedFiler;
 const seaweedAppDir = process.env.SEAWEEDFS_DIR || 'hisabpata';
 
-// Determine folder category from MIME type or file extension
-function getSeaweedFolder(mimetype, filename) {
+// Allowed folder names (purpose-based, not file-type-based)
+// Callers pass the folder name explicitly via query param or form field.
+const SEAWEED_FOLDERS = {
+  'profile-pictures': 'profile-pictures', // user profile photos
+  'org-profile':      'org-profile',      // organization logos
+  'vouchers':         'vouchers',          // transaction / voucher attachments
+  'audio':            'audio',             // voice notes
+  'files':            'files',             // generic fallback
+};
+
+function resolveSeaweedFolder(requestedFolder, mimetype, filename) {
+  // If caller passed a valid explicit folder, use it
+  if (requestedFolder && SEAWEED_FOLDERS[requestedFolder]) return SEAWEED_FOLDERS[requestedFolder];
+  // Auto-detect audio
   if (!mimetype) mimetype = '';
   if (mimetype.startsWith('audio/') || /\.(m4a|mp3|wav|aac|ogg|opus)$/i.test(filename)) return 'audio';
-  if (mimetype.startsWith('video/') || /\.(mp4|mov|avi|mkv)$/i.test(filename)) return 'video';
-  if (mimetype.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/i.test(filename)) return 'images';
+  // Default fallback
   return 'files';
 }
 
-// Upload a local file to SeaweedFS Filer. Returns the stored path to save in DB.
-async function uploadToSeaweed(localPath, filename, mimetype) {
+// Upload a local file to SeaweedFS Filer. Returns the stored path (folder/filename).
+async function uploadToSeaweed(localPath, filename, mimetype, folder) {
   if (!useSeaweed) return null;
   try {
-    const folder = getSeaweedFolder(mimetype, filename);
-    const filerPath = `/${seaweedAppDir}/${folder}/${filename}`;
+    const resolvedFolder = resolveSeaweedFolder(folder, mimetype, filename);
+    const filerPath = `/${seaweedAppDir}/${resolvedFolder}/${filename}`;
 
     const fileBuffer = fs.readFileSync(localPath);
     const uploadRes = await fetch(`${seaweedFiler}${filerPath}`, {
@@ -50,8 +61,8 @@ async function uploadToSeaweed(localPath, filename, mimetype) {
     // Delete local temp file after successful upload
     try { fs.unlinkSync(localPath); } catch (e) {}
 
-    // Return relative path — used in DB and as proxy URL key
-    return `${folder}/${filename}`;
+    // Return relative path stored in DB and used as proxy URL key
+    return `${resolvedFolder}/${filename}`;
   } catch (error) {
     console.error('[SeaweedFS Filer] Upload error:', error);
     return null;
@@ -238,7 +249,9 @@ app.post('/api/upload', authenticateToken, (req, res) => {
 
     let fileUrl = `/uploads/${req.file.filename}`;
     if (useSeaweed) {
-      const storedPath = await uploadToSeaweed(req.file.path, req.file.filename, req.file.mimetype);
+      // Caller can pass ?folder=profile-pictures / org-profile / vouchers etc.
+      const requestedFolder = req.query.folder || req.body?.folder || null;
+      const storedPath = await uploadToSeaweed(req.file.path, req.file.filename, req.file.mimetype, requestedFolder);
       if (storedPath) fileUrl = `/uploads/${storedPath}`;
     }
     res.json({ imageUrl: fileUrl });
@@ -3989,7 +4002,8 @@ app.post('/api/audio-notes/upload', authenticateToken, upload.single('audio'), a
 
     let audioUrl = `/uploads/${req.file.filename}`;
     if (useSeaweed) {
-      const storedPath = await uploadToSeaweed(req.file.path, req.file.filename, req.file.mimetype);
+      // Audio notes always go to the 'audio' folder
+      const storedPath = await uploadToSeaweed(req.file.path, req.file.filename, req.file.mimetype, 'audio');
       if (storedPath) audioUrl = `/uploads/${storedPath}`;
     }
 
