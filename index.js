@@ -272,7 +272,7 @@ const authenticateAdmin = (req, res, next) => {
 
 // Upload Endpoint (requires authentication, max 5MB, key: 'file')
 app.post('/api/upload', authenticateToken, (req, res) => {
-  upload.single('file')(req, res, (err) => {
+  upload.single('file')(req, res, async (err) => {
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(400).json({ error: 'File size limit exceeded. Max limit is 5MB.' });
