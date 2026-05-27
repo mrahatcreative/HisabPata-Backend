@@ -5648,6 +5648,125 @@ const emitAiStreamFinal = async (sendEvent, fullText, agentCtx, userId, messages
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AI PREPARE / FINALIZE — LLM calls run on the client; server builds context only
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/ai/agent/prepare', authenticateToken, async (req, res) => {
+  try {
+    const { bookId, messages } = req.body;
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'messages array is required' });
+    }
+
+    const agentCtx = await prepareAiAgentRequest(req.user.id, bookId, messages);
+    const { systemPrompt, contextBookId, intent, serverToolData, recommendedTemperature } = agentCtx;
+
+    const deterministic = await tryDeterministicAiResponse(messages, agentCtx, req.user.id);
+    if (deterministic.handled) {
+      await saveAiChatTurn({
+        userId: req.user.id,
+        userMessage: getLastUserMessage(messages),
+        assistantMessage: deterministic.cleanResponse,
+        bookId: contextBookId,
+        model: null,
+        provider: null,
+        intent,
+      });
+      return res.json({
+        mode: 'deterministic',
+        response: deterministic.cleanResponse,
+        proposedActions: deterministic.proposedActions || [],
+        contextBookId,
+        intent,
+      });
+    }
+
+    const offTopic = tryOffTopicAiResponse(messages, agentCtx);
+    if (offTopic.handled) {
+      await saveAiChatTurn({
+        userId: req.user.id,
+        userMessage: getLastUserMessage(messages),
+        assistantMessage: offTopic.cleanResponse,
+        bookId: contextBookId,
+        model: null,
+        provider: null,
+        intent: 'off_topic',
+      });
+      return res.json({
+        mode: 'deterministic',
+        response: offTopic.cleanResponse,
+        proposedActions: [],
+        contextBookId,
+        intent: 'off_topic',
+      });
+    }
+
+    const toolData = {};
+    if (serverToolData?.balanceBlock) toolData.balanceBlock = serverToolData.balanceBlock;
+    if (serverToolData?.categoryBlock) toolData.categoryBlock = serverToolData.categoryBlock;
+
+    return res.json({
+      mode: 'llm',
+      systemPrompt,
+      recommendedTemperature,
+      contextBookId,
+      intent,
+      serverToolData: toolData,
+    });
+  } catch (error) {
+    console.error('[AI Agent Prepare] Error:', error);
+    const msg = error?.message || String(error);
+    return res.status(500).json({
+      error: msg.includes('AudioNote') || msg.includes('does not exist')
+        ? `Database migration required: ${msg}`
+        : msg || 'Failed to prepare AI context',
+    });
+  }
+});
+
+app.post('/api/ai/agent/finalize', authenticateToken, async (req, res) => {
+  try {
+    const {
+      rawText,
+      bookId,
+      messages,
+      intent,
+      contextBookId,
+      serverToolData,
+      model,
+      provider,
+    } = req.body;
+
+    if (!rawText || !messages) {
+      return res.status(400).json({ error: 'rawText and messages are required' });
+    }
+
+    const ctxBookId = contextBookId || bookId || null;
+    const { cleanResponse, proposedActions } = await finalizeAiAgentResponse(rawText, {
+      contextBookId: ctxBookId,
+      userId: req.user.id,
+      intent: intent || 'general',
+      serverToolData: serverToolData || {},
+      messages,
+    });
+
+    await saveAiChatTurn({
+      userId: req.user.id,
+      userMessage: getLastUserMessage(messages),
+      assistantMessage: cleanResponse,
+      bookId: ctxBookId,
+      model: model || null,
+      provider: provider || null,
+      intent: intent || null,
+    });
+
+    return res.json({ response: cleanResponse, proposedActions });
+  } catch (error) {
+    console.error('[AI Agent Finalize] Error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to finalize AI response' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AGENTIC AI ROUTE — Tool Calling & Action Execution
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/ai/agent', authenticateToken, async (req, res) => {
