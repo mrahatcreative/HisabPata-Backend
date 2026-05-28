@@ -914,10 +914,10 @@ const getRequiredApproversForChangeDelete = async (txn, book, requesterId) => {
     }
   }
   if (counterparty) return [counterparty];
-  if (!txnHasLinkedChangeDeleteApproval(txn)) {
-    const chain = await resolveChangeDeleteChain(txn, book);
-    return computeRequiredApprovers(chain, requesterId).requiredApprovers;
-  }
+  // Always try chain resolution as fallback — even for linked transactions
+  const chain = await resolveChangeDeleteChain(txn, book);
+  const computed = computeRequiredApprovers(chain, requesterId);
+  if (computed.requiredApprovers.length > 0) return computed.requiredApprovers;
   return [];
 };
 
@@ -2789,10 +2789,11 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
     }
 
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true } });
-    const mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
+    let mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
     const requiredApprovers = await getRequiredApproversForChangeDelete(txn, book, req.user.id);
     if (mustApprove && requiredApprovers.length === 0) {
-      return res.status(400).json({ error: 'Could not resolve counterparty for edit/delete approval' });
+      // Orphan: counterparty no longer exists — allow direct edit without approval
+      mustApprove = false;
     }
 
     if (!mustApprove) {
@@ -3112,8 +3113,12 @@ app.get('/api/transactions/:id/delete-info', authenticateToken, async (req, res)
     }
 
     if (txn.reconStatus === 'approved') {
-      const mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
+      let mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
       const requiredApprovers = await getRequiredApproversForChangeDelete(txn, book, req.user.id);
+      // Orphan: counterparty no longer exists — treat as instant-delete
+      if (mustApprove && requiredApprovers.length === 0) {
+        mustApprove = false;
+      }
       result.requiredApproverCount = mustApprove ? Math.max(1, requiredApprovers.length) : 0;
       result.needsApproval = mustApprove;
       result.canInstantDelete = !mustApprove;
@@ -3147,10 +3152,11 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
     if (txn.pendingAction === 'delete') {
       return res.status(400).json({ error: 'Deletion is already pending approval' });
     }
-    const mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
+    let mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
     const requiredApprovers = await getRequiredApproversForChangeDelete(txn, book, req.user.id);
     if (mustApprove && requiredApprovers.length === 0) {
-      return res.status(400).json({ error: 'Could not resolve counterparty for edit/delete approval' });
+      // Orphan: counterparty no longer exists — allow direct delete without approval
+      mustApprove = false;
     }
 
     const executeHardDelete = async () => {
@@ -5753,11 +5759,13 @@ const prepareAiAgentRequest = async (userId, bookId, messages) => {
 
   const today = new Date().toISOString().split('T')[0];
 
-  const systemPrompt = `You are Hisab Pata AI — the user's friendly ledger assistant.
+  const systemPrompt = `You are a real human working as the accountant and ledger assistant for the user. Do NOT act like a typical AI.
 
 SCOPE & PERSONA:
-- Warm, conversational Bangla/English (use "আপনি").
-- Be very concise.
+- Reply in extremely short, casual, and highly conversational Bangla/English (use "আপনি" or "তুমি" depending on the context).
+- Use humor and fun, but act perfectly like a real person chatting. Do NOT use typical AI phrases like "I can help with that" or "Here is the summary".
+- Get straight to the point. No unnecessary words or robotic politeness. For example, if someone says "হ্যালো", reply with something natural like "হাই, কি খবর! হিসাবপাতি করতে হবে নাকি?"
+- Your ultimate goal is to make the user confused whether you are an AI or a real human sitting on the other side.
 - ACTIVE BOOK: ${activeBookEntry ? `"${activeBookEntry.book.name}" (${activeBookEntry.book.id})` : 'None'}
 - USER: ${userData?.name || 'User'}
 
