@@ -13,8 +13,6 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
-const { Readable } = require('stream');
-const crypto = require('crypto');
 const sharp = require('sharp');
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 
@@ -395,11 +393,16 @@ const hasAdminOrEditorAccess = async (orgId, userId) => {
 const checkApprovalBypass = async (orgId, userId) => {
   const org = await prisma.organization.findUnique({
     where: { id: orgId },
-    select: { isPersonal: true }
+    select: { isPersonal: true, approvalPolicy: true, whitelistedUserIds: true }
   });
   if (!org || org.isPersonal) return true;
+  if (org.approvalPolicy === 'GLOBALLY_OFF') return true;
+  if (org.approvalPolicy === 'CONDITIONAL_ON') {
+    return (org.whitelistedUserIds || []).includes(userId);
+  }
   return false;
 };
+
 
 // Which org's approval policy applies (fund org for cross-book vouchers, else book's org)
 const resolveApprovalOrgId = async (txn, book) => {
@@ -918,10 +921,52 @@ const getRequiredApproversForChangeDelete = async (txn, book, requesterId) => {
   const chain = await resolveChangeDeleteChain(txn, book);
   const computed = computeRequiredApprovers(chain, requesterId);
   if (computed.requiredApprovers.length > 0) return computed.requiredApprovers;
+
+  // Real organization book fallback: require approval from org admins/editors
+  if (book.organizationId) {
+    const org = await prisma.organization.findUnique({
+      where: { id: book.organizationId },
+      select: { isPersonal: true }
+    });
+    if (org && !org.isPersonal) {
+      const bypass = await checkApprovalBypass(book.organizationId, requesterId);
+      if (!bypass) {
+        const admins = await prisma.organizationMember.findMany({
+          where: {
+            organizationId: book.organizationId,
+            status: 'active',
+            OR: [
+              { role: 'admin' },
+              { permissions: { has: 'edit_all' } }
+            ]
+          },
+          select: { userId: true }
+        });
+        const adminIds = admins.map(a => a.userId).filter(id => id !== requesterId);
+        if (adminIds.length > 0) {
+          return adminIds;
+        }
+      }
+    }
+  }
+
   return [];
 };
 
 const mustUseChangeDeleteApprovalFlow = async (txn, book, requesterId) => {
+  if (book.organizationId) {
+    const org = await prisma.organization.findUnique({
+      where: { id: book.organizationId },
+      select: { isPersonal: true }
+    });
+    if (org && !org.isPersonal) {
+      const bypass = await checkApprovalBypass(book.organizationId, requesterId);
+      if (!bypass) {
+        return true;
+      }
+    }
+  }
+
   const pairedFund = await findFundVoucherPairedTxn(txn, book);
   if (
     txn.type === 'income' &&
@@ -987,6 +1032,18 @@ const buildChangeDeletePendingData = async (txn, book, requesterId, baseData = {
   const dualLegSameUser =
     (requiredApprovers.length === 1 && requiredApprovers[0] === requesterId) ||
     (!!pairedFund && pairedFund.createdById === requesterId && txn.createdById === requesterId);
+
+  let finalOrgApprovalAnyOf = orgApprovalAnyOf;
+  if (finalOrgApprovalAnyOf.length === 0 && book.organizationId) {
+    const org = await prisma.organization.findUnique({
+      where: { id: book.organizationId },
+      select: { isPersonal: true }
+    });
+    if (org && !org.isPersonal) {
+      finalOrgApprovalAnyOf = requiredApprovers;
+    }
+  }
+
   return {
     ...baseData,
     requestedBy: requesterId,
@@ -995,7 +1052,7 @@ const buildChangeDeletePendingData = async (txn, book, requesterId, baseData = {
     linkedTransactionId: txn.linkedTransactionId || null,
     pairedTransactionId: pairedFund?.id || null,
     requiredApprovers,
-    orgApprovalAnyOf,
+    orgApprovalAnyOf: finalOrgApprovalAnyOf,
     approvals: [],
     legApprovals: [],
     partyCount: partyIds.length,
@@ -1336,32 +1393,6 @@ const getFundSendChain = async (txn, txClient = prisma) => {
   return null;
 };
 
-const syncFundSendChainStatus = async (tx, txn, status, historyEntry, extraData = {}) => {
-  const chain = await getFundSendChain(txn, tx);
-  if (!chain) return false;
-  for (const t of chain) {
-    const cur = await tx.transaction.findUnique({
-      where: { id: t.id },
-      select: { version: true, updateHistory: true }
-    });
-    if (!cur) throw new Error('Chain transaction not found');
-    const data = {
-      reconStatus: status,
-      version: { increment: 1 },
-      ...extraData
-    };
-    if (historyEntry) {
-      data.updateHistory = [...(cur.updateHistory || []), historyEntry];
-    }
-    const upd = await tx.transaction.updateMany({
-      where: { id: t.id, version: cur.version },
-      data
-    });
-    if (upd.count === 0) throw new Error(`Concurrency conflict on fund_send chain ${t.id}`);
-  }
-  return true;
-};
-
 const rejectFundSendChain = async (tx, txn, rejectHistoryEntry) => {
   const chain = await getFundSendChain(txn, tx);
   if (!chain) return false;
@@ -1485,43 +1516,6 @@ async function updateTxnWithVersion(txnId, expectedVersion, data, prismaClient) 
     throw new Error(`Concurrency conflict: expected version ${expectedVersion}, current version ${current.version}, status ${current.reconStatus}`);
   }
   return client.transaction.findUnique({ where: { id: txnId } });
-}
-
-// Atomic update for both linked transaction pair with version locking
-async function updateLinkedPairAtomic(txn1Id, txn2Id, data, prismaClient) {
-  const client = prismaClient || prisma;
-  const txn1 = await client.transaction.findUnique({ where: { id: txn1Id }, select: { version: true } });
-  if (!txn1) throw new Error('Transaction 1 not found');
-  const txn2 = txn2Id ? await client.transaction.findUnique({ where: { id: txn2Id }, select: { version: true } }) : null;
-  if (txn2Id && !txn2) throw new Error('Transaction 2 not found');
-
-  const ops = [
-    client.transaction.updateMany({
-      where: { id: txn1Id, version: txn1.version },
-      data: { ...data, version: { increment: 1 } }
-    })
-  ];
-  if (txn2) {
-    ops.push(
-      client.transaction.updateMany({
-        where: { id: txn2Id, version: txn2.version },
-        data: { ...data, version: { increment: 1 } }
-      })
-    );
-  }
-  const results = await Promise.all(ops);
-  for (let i = 0; i < results.length; i++) {
-    if (results[i].count === 0) {
-      const txnId = i === 0 ? txn1Id : txn2Id;
-      const current = await prisma.transaction.findUnique({ where: { id: txnId }, select: { version: true, reconStatus: true } });
-      throw new Error(`Concurrency conflict on ${txnId}: expected version ${i === 0 ? txn1.version : txn2.version}, current ${current.version}`);
-    }
-  }
-  const [updated1, updated2] = await Promise.all([
-    client.transaction.findUnique({ where: { id: txn1Id } }),
-    txn2Id ? client.transaction.findUnique({ where: { id: txn2Id } }) : Promise.resolve(null)
-  ]);
-  return [updated1, updated2];
 }
 
 /** Client ISO dateTime (device timezone) → Date for DB; falls back to now. */
@@ -4310,17 +4304,7 @@ app.get('/api/transactions/:bookId', authenticateToken, async (req, res) => {
       select: { isPersonal: true }
     });
 
-    const whereClause = org?.isPersonal
-      ? { bookId }
-      : {
-          OR: [
-            { bookId },
-            {
-              orgFundId: bookId,
-              book: { organization: { isPersonal: true } }
-            }
-          ]
-        };
+    const whereClause = { bookId };
 
     const transactions = await prisma.transaction.findMany({
       where: whereClause,
@@ -4643,6 +4627,7 @@ app.get('/api/approvals/pending', authenticateToken, async (req, res) => {
           type: (txn.category === 'Send' || txn.recipientOrgId) ? 'disbursement_approval' : 'voucher_approval',
           id: txn.id,
           refId: txn.id,
+          bookId: isFundVoucher ? txn.orgFundId : txn.bookId,
           title: actionLabel,
           message,
           amount: txn.amount,
@@ -4711,6 +4696,7 @@ app.get('/api/approvals/pending', authenticateToken, async (req, res) => {
         type: 'incoming_send',
         id: txn.id,
         refId: txn.id,
+        bookId: txn.bookId,
         title: 'Incoming Fund Send',
         message: txn.note || '',
         amount: txn.amount,
@@ -5424,18 +5410,6 @@ const matchBookFromUserMessage = (text, booksWithOrg) => {
   return best;
 };
 
-const isAppRelatedAiQuestion = (text, booksWithOrg) => {
-  const msg = text || '';
-  const appRelated =
-    /(hisab|হিসাব|pata|পাতা|balance|ব্যালেন্স|transaction|লেনদেন|book|খাতা|বই|org|সংগঠন|send|expense|income|খরচ|আয়|category|approval|অনুমোদন|টাকা|taka|ledger|account|fund|rickshaw|বাজার|salary|বেতন|personal|member|admin|editor|জমা|deposit|উইক|week|notebook|নোট|খরচ|দেখ|কত|আছে|যোগ|লিখ|রেকর্ড|audio|অডিও|voice|pending|অপেক্ষ)/i;
-  if (appRelated.test(msg)) return true;
-  if (matchBookFromUserMessage(msg, booksWithOrg)) return true;
-  if (/\?/.test(msg) && /(কি|কী|কত|আছে|দেখ|বল|হবে|কেন|কিভাবে|how|what|show|list)/i.test(msg)) {
-    return true;
-  }
-  return false;
-};
-
 const detectAiIntent = (messages) => {
   const lastUser = [...(messages || [])].reverse().find(m => m.role === 'user');
   const q = (lastUser?.content || '').toLowerCase();
@@ -5544,10 +5518,6 @@ const saveAiChatTurn = async ({ userId, userMessage, assistantMessage, bookId, m
     console.error('[AI Chat] Failed to save turn:', error);
   }
 };
-
-// Casual / clarify / off-topic replies go to the LLM (no canned text).
-const tryClarifyAmbiguousAiResponse = () => ({ handled: false });
-const tryOffTopicAiResponse = () => ({ handled: false });
 
 const isBanglaMessage = (text) => /[\u0980-\u09FF]/.test(text || '');
 
@@ -5681,48 +5651,9 @@ const tryDeterministicAiResponse = async (messages, agentCtx, userId) => {
   return { handled: false };
 };
 
-const fetchAiCategorySummary = async (userId, bookId) => {
-  const memberships = await prisma.organizationMember.findMany({
-    where: { userId, status: 'active' },
-    include: { organization: { include: { books: true } } },
-  });
-  const bookIds = bookId
-    ? [bookId]
-    : memberships.flatMap(m => m.organization.books.map(b => b.id));
-  const transactions = await prisma.transaction.findMany({
-    where: { bookId: { in: bookIds }, type: 'expense', reconStatus: 'approved' },
-    select: { category: true, amount: true },
-  });
-  const summary = {};
-  let total = 0;
-  for (const t of transactions) {
-    const cat = t.category || 'Other';
-    summary[cat] = (summary[cat] || 0) + t.amount;
-    total += t.amount;
-  }
-  return Object.entries(summary)
-    .map(([category, amount]) => ({
-      category,
-      amount: Math.round(amount * 100) / 100,
-      percentage: total > 0 ? Math.round((amount / total) * 100) : 0,
-      count: transactions.filter(t => (t.category || 'Other') === category).length,
-    }))
-    .sort((a, b) => b.amount - a.amount);
-};
-
 const formatBalanceDataBlock = (books) => {
   const payload = books.map(b => ({ book: b.name, balance: b.balance, org: b.organization }));
   return `[DATA type:balance]\n${JSON.stringify(payload)}\n[/DATA]`;
-};
-
-const formatCategoryDataBlock = (categories) => {
-  const payload = categories.map(c => ({
-    category: c.category,
-    amount: c.amount,
-    count: c.count,
-    percentage: c.percentage,
-  }));
-  return `[DATA type:category]\n${JSON.stringify(payload)}\n[/DATA]`;
 };
 
 const prepareAiAgentRequest = async (userId, bookId, messages) => {
@@ -5790,9 +5721,6 @@ TRANSACTIONS (STRICT RULES):
     contextBookId,
     intent,
     serverToolData: {},
-    booksWithOrg,
-    recentTxns: [],
-    pendingApprovalCount: 0,
     transactionHints,
     recommendedTemperature,
   };
@@ -5969,58 +5897,13 @@ app.post('/api/ai/agent/prepare', authenticateToken, async (req, res) => {
       });
     }
 
-    const clarify = tryClarifyAmbiguousAiResponse(messages, agentCtx);
-    if (clarify.handled) {
-      await saveAiChatTurn({
-        userId: req.user.id,
-        userMessage: getLastUserMessage(messages),
-        assistantMessage: clarify.cleanResponse,
-        bookId: contextBookId,
-        model: null,
-        provider: null,
-        intent: 'clarify',
-      });
-      return res.json({
-        mode: 'deterministic',
-        response: clarify.cleanResponse,
-        proposedActions: [],
-        contextBookId,
-        intent: 'clarify',
-      });
-    }
-
-    const offTopic = tryOffTopicAiResponse(messages, agentCtx);
-    if (offTopic.handled) {
-      await saveAiChatTurn({
-        userId: req.user.id,
-        userMessage: getLastUserMessage(messages),
-        assistantMessage: offTopic.cleanResponse,
-        bookId: contextBookId,
-        model: null,
-        provider: null,
-        intent: 'off_topic',
-      });
-      return res.json({
-        mode: 'deterministic',
-        response: offTopic.cleanResponse,
-        proposedActions: [],
-        contextBookId,
-        intent: 'off_topic',
-      });
-    }
-
-    const toolData = {};
-    if (serverToolData?.balanceBlock) toolData.balanceBlock = serverToolData.balanceBlock;
-    if (serverToolData?.categoryBlock) toolData.categoryBlock = serverToolData.categoryBlock;
-    if (serverToolData?.recentBlock) toolData.recentBlock = serverToolData.recentBlock;
-
     return res.json({
       mode: 'llm',
       systemPrompt,
       recommendedTemperature,
       contextBookId,
       intent,
-      serverToolData: toolData,
+      serverToolData: serverToolData || {},
     });
   } catch (error) {
     console.error('[AI Agent Prepare] Error:', error);
@@ -6120,40 +6003,6 @@ app.post('/api/ai/agent', authenticateToken, async (req, res) => {
       return res.json({
         response: deterministic.cleanResponse,
         proposedActions: deterministic.proposedActions || [],
-      });
-    }
-
-    const clarifyFin = tryClarifyAmbiguousAiResponse(messages, agentCtx);
-    if (clarifyFin.handled) {
-      await saveAiChatTurn({
-        userId: req.user.id,
-        userMessage: getLastUserMessage(messages),
-        assistantMessage: clarifyFin.cleanResponse,
-        bookId: contextBookId,
-        model,
-        provider,
-        intent: 'clarify',
-      });
-      return res.json({
-        response: clarifyFin.cleanResponse,
-        proposedActions: [],
-      });
-    }
-
-    const offTopic = tryOffTopicAiResponse(messages, agentCtx);
-    if (offTopic.handled) {
-      await saveAiChatTurn({
-        userId: req.user.id,
-        userMessage: getLastUserMessage(messages),
-        assistantMessage: offTopic.cleanResponse,
-        bookId: contextBookId,
-        model,
-        provider,
-        intent: 'off_topic',
-      });
-      return res.json({
-        response: offTopic.cleanResponse,
-        proposedActions: [],
       });
     }
 
@@ -6377,38 +6226,6 @@ app.post('/api/ai/agent/stream', authenticateToken, async (req, res) => {
       if (deterministic.proposedActions?.length) {
         sendEvent('actions', { actions: deterministic.proposedActions });
       }
-      sendEvent('done', {});
-      return res.end();
-    }
-
-    const clarifyStream = tryClarifyAmbiguousAiResponse(messages, agentCtx);
-    if (clarifyStream.handled) {
-      await saveAiChatTurn({
-        userId: req.user.id,
-        userMessage: getLastUserMessage(messages),
-        assistantMessage: clarifyStream.cleanResponse,
-        bookId: contextBookId,
-        model,
-        provider,
-        intent: 'clarify',
-      });
-      sendEvent('clean', { response: clarifyStream.cleanResponse });
-      sendEvent('done', {});
-      return res.end();
-    }
-
-    const offTopic = tryOffTopicAiResponse(messages, agentCtx);
-    if (offTopic.handled) {
-      await saveAiChatTurn({
-        userId: req.user.id,
-        userMessage: getLastUserMessage(messages),
-        assistantMessage: offTopic.cleanResponse,
-        bookId: contextBookId,
-        model,
-        provider,
-        intent: 'off_topic',
-      });
-      sendEvent('clean', { response: offTopic.cleanResponse });
       sendEvent('done', {});
       return res.end();
     }
