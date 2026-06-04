@@ -5623,36 +5623,6 @@ const buildTransactionAction = (hints, lastUserMessage, bookRecord) => ({
 });
 
 const tryDeterministicAiResponse = async (messages, agentCtx, userId) => {
-  const lastUserMessage = getLastUserMessage(messages);
-  const isBn = isBanglaMessage(lastUserMessage);
-  const { intent, transactionHints } = agentCtx;
-
-  // Only fast-path: structured transaction proposal (approval UI). All conversational text → LLM.
-  if (intent === 'transaction' && transactionHints?.amount && transactionHints?.bookId) {
-    const hints = agentCtx.transactionHints;
-    const book = await prisma.book.findFirst({
-      where: { id: hints.bookId },
-      include: { organization: { include: { members: { where: { userId } } } } },
-    });
-    if (book && book.organization.members.length > 0) {
-      const action = buildTransactionAction(hints, lastUserMessage, book);
-      const preview = formatTransactionsDataBlock([{
-        note: action.data.note,
-        amount: action.data.amount,
-        type: action.data.type,
-        category: action.data.category,
-      }]);
-      const text = isBn
-        ? `${book.name} খাতায় ৳${hints.amount} ${hints.type === 'income' ? 'আয়' : 'খরচ'} approval-এর জন্য প্রস্তুত।`
-        : `Ready to add ৳${hints.amount} ${hints.type} to "${book.name}" for your approval.`;
-      return {
-        handled: true,
-        cleanResponse: `${text}\n\n${preview}`,
-        proposedActions: [action],
-      };
-    }
-  }
-
   return { handled: false };
 };
 
@@ -5746,10 +5716,18 @@ INSTRUCTIONS:
   4. [FETCH_RECENT_TXN] -> Active book recent txns (only if missing in context)
 
 TRANSACTIONS:
-- You must extract: amount, category, description. If any of these are missing, ask the user.
-- If ready, output EXACTLY this format:
+- ALL fields are strictly MANDATORY: amount, category, description, and note.
+- DESCRIPTION MUST BE VERY DETAILED:
+  * Transport (e.g. Rickshaw, Uber, Bus): You must ask "কোথায় থেকে কোথায় গিয়েছিলেন? কেন গিয়েছিলেন? সাথে কি কেউ ছিল?" (From where to where? Why? Anyone with you?). Do NOT accept simple "Rickshaw fare" or "transport cost".
+  * Food/Restaurant: You must ask "কোথায় খেয়েছেন? কার সাথে? কোনো উপলক্ষ ছিল?" (Where did you eat? With whom? Any occasion?).
+  * Other categories: Ask for specific contextual details.
+- TWO-STEP CONFIRMATION FLOW (STRICT REQUIREMENT):
+  1. First, ask conversational questions to gather all the mandatory description details.
+  2. Once all details are gathered, summarize them and explicitly ask the user for confirmation (e.g., "আমি কি এটি আপনার ডেমো খাতায় যোগ করব?").
+  3. ONLY output the JSON action block AFTER the user explicitly confirms (e.g., says "yes", "হ্যাঁ", "করো", "যোগ করো"). Do NOT output the action block before the user says yes.
+- Once confirmed by the user, output the action block using this exact format:
 \`\`\`action
-{"action":"create_transaction","data":{"bookId":"<id>","type":"expense","amount":500,"category":"Transport","description":"Rickshaw fare","note":"Rickshaw"}}
+{"action":"create_transaction","data":{"bookId":"<id>","type":"expense","amount":500,"category":"Transport","description":"Rickshaw fare from Dhanmondi to Gulshan for business meeting with Rahim","note":"Rickshaw"}}
 \`\`\`
 `;
 
