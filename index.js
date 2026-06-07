@@ -1227,7 +1227,10 @@ const syncCounterpartLegsForChangeDelete = async (tx, txn, book, opts, requester
 const deleteCounterpartLegsForChangeDelete = async (tx, txn, book) => {
   const legs = await getCounterpartLegsForChangeDelete(txn, book, tx);
   for (const leg of legs) {
-    const adj = reverseTxnBalanceForRemoval(leg);
+    let adj = reverseTxnBalanceForRemoval(leg);
+    if (leg.reconStatus === 'rejected') {
+      adj = 0; // Already reversed when rejected
+    }
     if (adj !== 0) {
       await tx.book.update({
         where: { id: leg.bookId },
@@ -3358,6 +3361,9 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
     if (mustApprove && requiredApprovers.length === 0) {
       // Orphan: counterparty no longer exists — allow direct delete without approval
       mustApprove = false;
+    }
+    if (txn.reconStatus === 'rejected') {
+      mustApprove = false; // Dead transactions can be hard deleted directly
     }
 
     const executeHardDelete = async () => {
