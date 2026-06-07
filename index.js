@@ -2762,8 +2762,8 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
       if (linkedTxn) {
         const linkedBook = await prisma.book.findUnique({ where: { id: linkedTxn.bookId }, select: { organizationId: true } });
         if (linkedBook) {
-          const linkedOrg = await prisma.organization.findUnique({ where: { id: linkedBook.organizationId }, select: { isActive: true, isPersonal: true } });
-          if (linkedOrg && linkedOrg.isActive && !linkedOrg.isPersonal) {
+          const linkedOrg = await prisma.organization.findUnique({ where: { id: linkedBook.organizationId }, select: { isPersonal: true } });
+          if (linkedOrg && !linkedOrg.isPersonal) {
             const membership = await prisma.organizationMember.findUnique({
               where: { userId_organizationId: { userId: req.user.id, organizationId: linkedBook.organizationId } }
             });
@@ -2861,8 +2861,10 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
         else if (txn.type === 'income') balanceAdjustment = parsedAmount - txn.amount;
       }
 
-      const updated = await prisma.$transaction(async (prisma) => {
-        const updatedTxn = await prisma.transaction.update({
+      let updated;
+      try {
+        updated = await prisma.$transaction(async (prisma) => {
+          const updatedTxn = await prisma.transaction.update({
           where: { id: txnId },
           data: {
             ...changes,
@@ -2897,11 +2899,15 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
               action: 'edit (counterpart)',
               changes: { new: linkedChanges }
             }
-          });
+          }, req.user.id);
         }
 
         return updatedTxn;
       });
+      } catch (err) {
+        console.error('Error during direct edit transaction sync:', err);
+        return res.status(500).json({ error: 'Failed to process direct edit. Internal error.' });
+      }
 
       broadcast({ type: 'data_changed' });
       const enriched = await enrichTxn(updated);
@@ -2921,8 +2927,10 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
         newCategory: changes.category !== undefined ? changes.category : txn.category,
       });
 
-      const updated = await prisma.$transaction(async (prisma) => {
-        // Read current balance INSIDE the transaction
+      let updated;
+      try {
+        updated = await prisma.$transaction(async (prisma) => {
+          // Read current balance INSIDE the transaction
         const currentBook = await prisma.book.findUnique({ where: { id: book.id }, select: { balance: true } });
         let preTxnBalance = currentBook.balance;
         if (txn.type === 'expense') {
@@ -2973,10 +2981,14 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
             changes: { new: linkedChanges }
           },
           reverseBalanceOnRequest: true
-        });
+        }, req.user.id);
 
         return updatedTxn;
       });
+      } catch (err) {
+        console.error('Error during pending edit transaction sync:', err);
+        return res.status(500).json({ error: 'Failed to process pending edit. Internal error.' });
+      }
 
       broadcast({ type: 'data_changed' });
       await notifyChangeDeleteApprovers(updated, 'edit', pendingData);
@@ -3209,8 +3221,8 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
       if (linkedTxn) {
         const linkedBook = await prisma.book.findUnique({ where: { id: linkedTxn.bookId }, select: { organizationId: true } });
         if (linkedBook) {
-          const linkedOrg = await prisma.organization.findUnique({ where: { id: linkedBook.organizationId }, select: { isActive: true, isPersonal: true } });
-          if (linkedOrg && linkedOrg.isActive && !linkedOrg.isPersonal) {
+          const linkedOrg = await prisma.organization.findUnique({ where: { id: linkedBook.organizationId }, select: { isPersonal: true } });
+          if (linkedOrg && !linkedOrg.isPersonal) {
             const membership = await prisma.organizationMember.findUnique({
               where: { userId_organizationId: { userId: req.user.id, organizationId: linkedBook.organizationId } }
             });
