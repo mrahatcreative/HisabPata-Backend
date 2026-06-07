@@ -4333,6 +4333,7 @@ app.post('/api/asr/transcribe', authenticateToken, upload.single('audio_file'), 
     if (!req.file) return res.status(400).json({ error: 'No audio file provided' });
     const { enabled } = getAsrConfig();
     if (!enabled) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
       return res.status(503).json({
         error: 'ASR not configured',
         hint: 'Set ASR_BASE_URL and ASR_API_KEY on the backend (BanglaSpeechAPI VALID_API_KEYS).',
@@ -4345,12 +4346,17 @@ app.post('/api/asr/transcribe', authenticateToken, upload.single('audio_file'), 
       req.file.mimetype
     );
 
+    try { fs.unlinkSync(req.file.path); } catch (_) {}
+
     if (!text) {
       return res.status(502).json({ error: 'Transcription failed' });
     }
 
     res.json({ text });
   } catch (err) {
+    if (req.file && req.file.path) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+    }
     console.error('ASR transcribe error:', err);
     res.status(500).json({ error: 'Server error during transcription' });
   }
