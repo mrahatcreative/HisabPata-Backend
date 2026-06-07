@@ -2851,6 +2851,10 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
     const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
     if (!txn) return res.status(404).json({ error: 'Transaction not found' });
 
+    if (txn.reconStatus === 'rejected') {
+      return res.status(400).json({ error: 'Rejected transactions cannot be edited. Please retry or create a new one.' });
+    }
+
     const book = await prisma.book.findUnique({ where: { id: txn.bookId }, include: { organization: { select: { isPersonal: true } } } });
     if (!book) return res.status(404).json({ error: 'Book not found' });
 
@@ -3359,6 +3363,9 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
     const executeHardDelete = async () => {
       await prisma.$transaction(async (prisma) => {
         let balanceAdjustment = reverseTxnBalanceForRemoval(txn);
+        if (txn.reconStatus === 'rejected') {
+          balanceAdjustment = 0; // Already reversed when rejected
+        }
         if (balanceAdjustment !== 0) {
           await prisma.book.update({ where: { id: book.id }, data: { balance: { increment: balanceAdjustment } } });
         }
@@ -3375,10 +3382,12 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
 
     // Linked transaction/requires approval: transition to pending delete
     let reversedBalance = book.balance;
-    if (txn.type === 'expense') {
-      reversedBalance += txn.amount;
-    } else if (txn.type === 'income') {
-      reversedBalance -= txn.amount;
+    if (txn.reconStatus !== 'rejected') {
+      if (txn.type === 'expense') {
+        reversedBalance += txn.amount;
+      } else if (txn.type === 'income') {
+        reversedBalance -= txn.amount;
+      }
     }
 
     const pendingData = await buildChangeDeletePendingData(txn, book, req.user.id, {
