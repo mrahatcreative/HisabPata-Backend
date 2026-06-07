@@ -557,6 +557,15 @@ const txnHasLinkedChangeDeleteApproval = (txn) =>
     txn.orgFundId
   );
 
+// Check if linked transaction's book still exists (not soft-deleted)
+const linkedBookExists = async (txn) => {
+  if (!txn.linkedTransactionId) return true;
+  const linkedTxn = await prisma.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { bookId: true } });
+  if (!linkedTxn) return false;
+  const book = await prisma.book.findUnique({ where: { id: linkedTxn.bookId }, select: { isActive: true } });
+  return book?.isActive === true;
+};
+
 const getChangeDeleteCounterpartyUserId = async (txn, book, requesterId) => {
   const disbursement = await resolveOrgDisbursementOrgTxn(txn, book);
   if (disbursement) {
@@ -979,6 +988,10 @@ const mustUseChangeDeleteApprovalFlow = async (txn, book, requesterId) => {
   ) {
     return false;
   }
+  if (txn.linkedTransactionId) {
+    const exists = await linkedBookExists(txn);
+    if (!exists) return false;
+  }
   if (txnHasLinkedChangeDeleteApproval(txn) || pairedFund) return true;
   const required = await getRequiredApproversForChangeDelete(txn, book, requesterId);
   return required.length > 0;
@@ -1076,7 +1089,7 @@ const getCounterpartLegsForChangeDelete = async (txn, book, txClient = prisma) =
   return legs;
 };
 
-const syncCounterpartLegsForChangeDelete = async (tx, txn, book, opts) => {
+const syncCounterpartLegsForChangeDelete = async (tx, txn, book, opts, requesterId = null) => {
   const {
     pendingAction,
     pendingData,
@@ -1089,11 +1102,22 @@ const syncCounterpartLegsForChangeDelete = async (tx, txn, book, opts) => {
     const legBook = await tx.book.findUnique({ where: { id: leg.bookId } });
     if (!legBook) continue;
 
+    // Block sync to org books if requester is no longer a member
+    if (requesterId && legBook.organizationId) {
+      const legOrg = await tx.organization.findUnique({ where: { id: legBook.organizationId }, select: { isPersonal: true } });
+      if (legOrg && !legOrg.isPersonal) {
+        const membership = await tx.organizationMember.findUnique({
+          where: { userId_organizationId: { userId: requesterId, organizationId: legBook.organizationId } }
+        });
+        if (!membership || membership.status !== 'active') continue;
+      }
+    }
+
     if (reverseBalanceOnRequest) {
       let reversed = legBook.balance;
       if (leg.type === 'income') reversed -= leg.amount;
       else if (leg.type === 'expense') reversed += leg.amount;
-      await tx.book.update({ where: { id: leg.bookId }, data: { balance: reversed } });
+      await tx.book.update({ where: { id: legBook.id }, data: { balance: reversed } });
     }
 
     const data = { ...fieldUpdates };
@@ -1642,44 +1666,45 @@ app.post('/api/auth/register', async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create user
-    const user = await prisma.user.create({
-      data: {
-        name,
-        email,
-        phoneNumber,
-        password: hashedPassword,
-      }
-    });
+    // Create user + personal org + member + book in one transaction
+    const user = await prisma.$transaction(async (tx) => {
+      const u = await tx.user.create({
+        data: {
+          name,
+          email,
+          phoneNumber,
+          password: hashedPassword,
+        }
+      });
 
-    // Create Personal Organization (auto-created, no invite code, no members)
-    const personalOrg = await prisma.organization.create({
-      data: {
-        name: `${name}'s Personal`,
-        isPersonal: true,
-        inviteCode: null,
-        categories: DEFAULT_CATEGORIES,
-      }
-    });
+      const personalOrg = await tx.organization.create({
+        data: {
+          name: `${name}'s Personal`,
+          isPersonal: true,
+          inviteCode: null,
+          categories: DEFAULT_CATEGORIES,
+        }
+      });
 
-    // Add user as admin of personal org (auto-active)
-    await prisma.organizationMember.create({
-      data: {
-        userId: user.id,
-        organizationId: personalOrg.id,
-        role: 'admin',
-        status: 'active',
-      }
-    });
+      await tx.organizationMember.create({
+        data: {
+          userId: u.id,
+          organizationId: personalOrg.id,
+          role: 'admin',
+          status: 'active',
+        }
+      });
 
-    // Create default book for personal org
-    await prisma.book.create({
-      data: {
-        name: 'Personal Book',
-        isDefault: true,
-        balance: 0.0,
-        organizationId: personalOrg.id,
-      }
+      await tx.book.create({
+        data: {
+          name: 'Personal Book',
+          isDefault: true,
+          balance: 0.0,
+          organizationId: personalOrg.id,
+        }
+      });
+
+      return u;
     });
 
     // Generate JWT
@@ -2092,7 +2117,7 @@ app.get('/api/books', authenticateToken, async (req, res) => {
 
     const orgIds = activeMemberships.map(m => m.organizationId);
     const books = await prisma.book.findMany({
-      where: { organizationId: { in: orgIds } },
+      where: { organizationId: { in: orgIds }, isActive: true },
       include: { organization: { select: { id: true, name: true, isPersonal: true, imageUrl: true } } }
     });
 
@@ -2195,11 +2220,11 @@ app.delete('/api/books/:bookId', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Default book cannot be deleted' });
     }
 
-    // Regular book — delete everything
-    await prisma.$transaction([
-      prisma.transaction.deleteMany({ where: { bookId: book.id } }),
-      prisma.book.delete({ where: { id: book.id } }),
-    ]);
+    // Soft delete — hide book, transactions survive
+    await prisma.book.update({
+      where: { id: book.id },
+      data: { isActive: false },
+    });
 
     broadcast({ type: "data_changed" });
     res.json({ message: 'Book deleted successfully' });
@@ -2718,6 +2743,25 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Only admins or editors can edit transactions' });
     }
 
+    // If personal book txn has linked org txn, check if user is still a member of that org
+    if (book.organization.isPersonal && txn.linkedTransactionId) {
+      const linkedTxn = await prisma.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { bookId: true } });
+      if (linkedTxn) {
+        const linkedBook = await prisma.book.findUnique({ where: { id: linkedTxn.bookId }, select: { organizationId: true } });
+        if (linkedBook) {
+          const linkedOrg = await prisma.organization.findUnique({ where: { id: linkedBook.organizationId }, select: { isActive: true, isPersonal: true } });
+          if (linkedOrg && linkedOrg.isActive && !linkedOrg.isPersonal) {
+            const membership = await prisma.organizationMember.findUnique({
+              where: { userId_organizationId: { userId: req.user.id, organizationId: linkedBook.organizationId } }
+            });
+            if (!membership || membership.status !== 'active') {
+              return res.status(403).json({ error: 'সংগঠন থেকে leave করার পর এই entry edit করা যাবে না। আবার জয়েন করুন।' });
+            }
+          }
+        }
+      }
+    }
+
     const finalType = type !== undefined ? type : txn.type;
     const finalCategory = category !== undefined ? category : txn.category;
     const isExistingOrgFundMirror =
@@ -2849,14 +2893,7 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
       const enriched = await enrichTxn(updated);
       return res.json({ transaction: enriched, message: 'Transaction updated' });
     } else {
-      // Pending edit request flow
-      let preTxnBalance = book.balance;
-      if (txn.type === 'expense') {
-        preTxnBalance += txn.amount;
-      } else if (txn.type === 'income') {
-        preTxnBalance -= txn.amount;
-      }
-
+      // Pending edit request flow — balance must be read inside transaction
       const pendingData = await buildChangeDeletePendingData(txn, book, req.user.id, {
         oldAmount: txn.amount,
         oldType: txn.type,
@@ -2871,6 +2908,15 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
       });
 
       const updated = await prisma.$transaction(async (prisma) => {
+        // Read current balance INSIDE the transaction
+        const currentBook = await prisma.book.findUnique({ where: { id: book.id }, select: { balance: true } });
+        let preTxnBalance = currentBook.balance;
+        if (txn.type === 'expense') {
+          preTxnBalance += txn.amount;
+        } else if (txn.type === 'income') {
+          preTxnBalance -= txn.amount;
+        }
+
         const updatedTxn = await prisma.transaction.update({
           where: { id: txnId },
           data: {
@@ -3052,7 +3098,7 @@ app.get('/api/transactions/:id/delete-info', authenticateToken, async (req, res)
       const linkedTxn = await prisma.transaction.findUnique({ where: { id: txn.linkedTransactionId } });
       if (linkedTxn) {
         const linkedBook = await prisma.book.findUnique({ where: { id: linkedTxn.bookId } });
-        if (linkedBook) {
+        if (linkedBook && linkedBook.isActive) {
           result.counterpartyExists = true;
           result.counterpartyType = 'book';
           result.counterpartyName = linkedBook.name;
@@ -3094,8 +3140,8 @@ app.get('/api/transactions/:id/delete-info', authenticateToken, async (req, res)
         // Check if the recipient user has any active personal book
         const userPersonalBooks = await prisma.book.findMany({
           where: {
-            organization: { isPersonal: true },
-            organization: { members: { some: { userId: txn.recipientUserId } } }
+            organization: { isPersonal: true, members: { some: { userId: txn.recipientUserId } } },
+            isActive: true
           },
           take: 1
         });
@@ -3142,8 +3188,28 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Only admins or editors can delete transactions' });
     }
 
+    // If personal book txn has linked org txn, check if user is still a member of that org
+    const bookOrg = await prisma.organization.findUnique({ where: { id: book.organizationId }, select: { isPersonal: true } });
+    if (bookOrg?.isPersonal && txn.linkedTransactionId) {
+      const linkedTxn = await prisma.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { bookId: true } });
+      if (linkedTxn) {
+        const linkedBook = await prisma.book.findUnique({ where: { id: linkedTxn.bookId }, select: { organizationId: true } });
+        if (linkedBook) {
+          const linkedOrg = await prisma.organization.findUnique({ where: { id: linkedBook.organizationId }, select: { isActive: true, isPersonal: true } });
+          if (linkedOrg && linkedOrg.isActive && !linkedOrg.isPersonal) {
+            const membership = await prisma.organizationMember.findUnique({
+              where: { userId_organizationId: { userId: req.user.id, organizationId: linkedBook.organizationId } }
+            });
+            if (!membership || membership.status !== 'active') {
+              return res.status(403).json({ error: 'সংগঠন থেকে leave করার পর এই entry delete করা যাবে না। আবার জয়েন করুন।' });
+            }
+          }
+        }
+      }
+    }
+
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true } });
-    const org = await prisma.organization.findUnique({ where: { id: book.organizationId }, select: { isPersonal: true } });
+    const org = bookOrg;
     if (txn.pendingAction === 'delete') {
       return res.status(400).json({ error: 'Deletion is already pending approval' });
     }
@@ -3578,22 +3644,41 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
       // Counter-approve inside approve action (legacy path)
       if (txn.counterProposedAmount != null && txn.counterProposedBy !== req.user.id) {
         const finalAmount = txn.counterProposedAmount;
-        const updates = [];
-        if (txn.linkedTransactionId) {
-          updates.push(
-            prisma.transaction.update({
-              where: { id: txn.linkedTransactionId },
-              data: { amount: finalAmount, category: 'Send', reconStatus: 'approved', counterProposedAmount: null, counterProposedBy: null }
-            })
-          );
-        }
-        updates.push(
-          prisma.transaction.update({
+        const amountDiff = finalAmount - txn.amount;
+
+        await prisma.$transaction(async (tx) => {
+          // Update amount on linked transaction if exists
+          if (txn.linkedTransactionId) {
+            const linked = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { bookId: true } });
+            if (linked) {
+              await tx.transaction.update({
+                where: { id: txn.linkedTransactionId },
+                data: { amount: finalAmount, category: 'Send', reconStatus: 'approved', counterProposedAmount: null, counterProposedBy: null }
+              });
+              // Adjust linked book balance
+              await tx.book.update({
+                where: { id: linked.bookId },
+                data: { balance: { increment: amountDiff } }
+              });
+            }
+          }
+
+          // Update main transaction
+          await tx.transaction.update({
             where: { id: txnId },
             data: { amount: finalAmount, reconStatus: 'approved', counterProposedAmount: null, counterProposedBy: null }
-          })
-        );
-        await prisma.$transaction(updates);
+          });
+
+          // Adjust source book balance for the difference
+          if (amountDiff !== 0) {
+            const bookAdj = txn.type === 'expense' ? amountDiff : -amountDiff;
+            await tx.book.update({
+              where: { id: txn.bookId },
+              data: { balance: { increment: bookAdj } }
+            });
+          }
+        });
+
         const updated = await prisma.transaction.findUnique({ where: { id: txnId } });
         broadcast({ type: "data_changed" });
         return res.json({ transaction: updated, message: 'Counter-approved, amount updated and approved' });
@@ -3678,17 +3763,18 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
           if (txn.orgFundId) {
             const targetBook = await prisma.book.findUnique({ where: { id: txn.orgFundId } });
             if (targetBook) {
-              await prisma.$transaction([
-                prisma.transaction.update({
+              await prisma.$transaction(async (tx) => {
+                const upd = await tx.transaction.updateMany({
                   where: { id: txnId, version: txn.version },
                   data: {
                     reconStatus: 'approved',
                     version: { increment: 1 },
                     updateHistory: [...(txn.updateHistory || []), approveHistoryEntry]
                   }
-                }),
-                prisma.book.update({ where: { id: targetBook.id }, data: { balance: { decrement: txn.amount } } }),
-                prisma.transaction.create({
+                });
+                if (upd.count === 0) throw new Error('Concurrency conflict on voucher approve');
+                await tx.book.update({ where: { id: targetBook.id }, data: { balance: { decrement: txn.amount } } });
+                await tx.transaction.create({
                   data: {
                     bookId: targetBook.id,
                     amount: txn.amount,
@@ -3702,8 +3788,8 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
                     clientRef: txn.clientRef,
                     imageUrl: txn.imageUrl
                   }
-                })
-              ]);
+                });
+              });
               broadcast({ type: "data_changed" });
               const updated = await prisma.transaction.findUnique({ where: { id: txnId } });
               return res.json({ transaction: updated, message: 'Voucher approved' });
@@ -3953,8 +4039,12 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
         return res.status(400).json({ error: 'Transaction is not in a rejectable state' });
       }
 
-      const book = await prisma.book.findUnique({ where: { id: txn.bookId } });
-      if (!book) return res.status(404).json({ error: 'Book not found' });
+    const book = await prisma.book.findUnique({ where: { id: txn.bookId } });
+    if (!book) return res.status(404).json({ error: 'Book not found' });
+
+    if (!(await hasAdminOrEditorAccess(book.organizationId, req.user.id))) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
 
       // ── Deficit liability check ──
       // If rejecting a deficit chain where the recipient's income was already approved,
@@ -4264,22 +4354,28 @@ app.delete('/api/transactions/:id/permanent', authenticateToken, async (req, res
     }
 
     await prisma.$transaction(async (tx) => {
-      // Reverse any lingering balance effect
-      const balanceAdj = txn.type === 'expense' ? txn.amount : -txn.amount;
-      await tx.book.update({
-        where: { id: txn.bookId },
-        data: { balance: { increment: balanceAdj } }
-      });
+      // Only reverse balance if transaction was NOT rejected (rejection already reversed it)
+      const alreadyReversed = txn.status === 'rejected' || txn.status === 'delete_rejected';
+      if (!alreadyReversed) {
+        const balanceAdj = txn.type === 'expense' ? txn.amount : -txn.amount;
+        await tx.book.update({
+          where: { id: txn.bookId },
+          data: { balance: { increment: balanceAdj } }
+        });
+      }
 
       // Delete linked transaction first if exists
       if (txn.linkedTransactionId) {
         const linked = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId } });
         if (linked) {
-          const linkedBalanceAdj = linked.type === 'income' ? -linked.amount : linked.amount;
-          await tx.book.update({
-            where: { id: linked.bookId },
-            data: { balance: { increment: linkedBalanceAdj } }
-          });
+          const linkedAlreadyReversed = linked.status === 'rejected' || linked.status === 'delete_rejected';
+          if (!linkedAlreadyReversed) {
+            const linkedBalanceAdj = linked.type === 'income' ? -linked.amount : linked.amount;
+            await tx.book.update({
+              where: { id: linked.bookId },
+              data: { balance: { increment: linkedBalanceAdj } }
+            });
+          }
           await tx.transaction.delete({ where: { id: txn.linkedTransactionId } });
         }
       }
@@ -7139,8 +7235,17 @@ wss.on('connection', (ws, req) => {
     try {
       const msg = JSON.parse(raw.toString());
       if (msg.type === 'auth') {
-        jwt.verify(msg.token, JWT_SECRET_FINAL, (err, decoded) => {
+        jwt.verify(msg.token, JWT_SECRET_FINAL, async (err, decoded) => {
           if (err) return;
+          // Verify tokenVersion matches (logout-all check)
+          try {
+            const dbUser = await prisma.user.findUnique({ where: { id: decoded.id }, select: { tokenVersion: true } });
+            if (!dbUser || dbUser.tokenVersion !== decoded.tokenVersion) {
+              ws.send(JSON.stringify({ type: 'auth_error', message: 'Token revoked' }));
+              ws.close();
+              return;
+            }
+          } catch (_) {}
           userId = decoded.id;
           if (!userClients.has(userId)) userClients.set(userId, new Set());
           userClients.get(userId).add(ws);
@@ -7206,6 +7311,15 @@ function handleAsrStream(clientWs, url) {
             clientWs.close();
             return;
           }
+          // Verify tokenVersion (logout-all check)
+          try {
+            const dbUser = await prisma.user.findUnique({ where: { id: decoded.id }, select: { tokenVersion: true } });
+            if (!dbUser || dbUser.tokenVersion !== decoded.tokenVersion) {
+              clientWs.send(JSON.stringify({ type: 'error', message: 'Token revoked' }));
+              clientWs.close();
+              return;
+            }
+          } catch (_) {}
           authenticated = true;
           clientWs.send(JSON.stringify({ type: 'auth_ok' }));
 

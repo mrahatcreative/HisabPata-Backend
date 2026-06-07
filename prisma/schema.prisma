@@ -87,6 +87,7 @@ model Book {
   id             String       @id @default(cuid())
   name           String
   isDefault      Boolean      @default(false)
+  isActive       Boolean      @default(true)
   balance        Float        @default(0)
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
