@@ -108,6 +108,10 @@ const prismaBase = new PrismaClient({ adapter });
 const { AsyncLocalStorage } = require('async_hooks');
 const requestContext = new AsyncLocalStorage();
 const txExecutions = new Map();
+// Clear txExecutions periodically to prevent memory leaks (runs every 10 minutes)
+setInterval(() => {
+  txExecutions.clear();
+}, 10 * 60 * 1000);
 
 const prisma = prismaBase.$extends({
   query: {
@@ -283,7 +287,7 @@ if (useS3) {
       if (!result.Body) return next();
       if (result.ContentType) res.setHeader('Content-Type', result.ContentType);
       if (result.ContentLength) res.setHeader('Content-Length', String(result.ContentLength));
-      res.setHeader('Cache-Control', 'public, max-age=31536000');
+      res.setHeader('Cache-Control', 'public, max-age=3600');
       result.Body.pipe(res);
     } catch (e) { next(); }
   });
@@ -397,12 +401,12 @@ async function transcribeWithBanglaSpeechApi(filePath, originalName, mimeType) {
   }
 }
 
-// Upload Endpoint (requires authentication, max 5MB, key: 'file')
+// Upload Endpoint (requires authentication, max 100MB, key: 'file')
 app.post('/api/upload', authenticateToken, (req, res) => {
   upload.single('file')(req, res, async (err) => {
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: 'File size limit exceeded. Max limit is 5MB.' });
+        return res.status(400).json({ error: 'File size limit exceeded. Max limit is 100MB.' });
       }
       return res.status(400).json({ error: err.message });
     } else if (err) {
@@ -1204,10 +1208,8 @@ const syncCounterpartLegsForChangeDelete = async (tx, txn, book, opts, requester
     }
 
     if (reverseBalanceOnRequest) {
-      let reversed = legBook.balance;
-      if (leg.type === 'income') reversed -= leg.amount;
-      else if (leg.type === 'expense') reversed += leg.amount;
-      await tx.book.update({ where: { id: legBook.id }, data: { balance: reversed } });
+      const balanceAdj = leg.type === 'expense' ? leg.amount : -leg.amount;
+      await tx.book.update({ where: { id: legBook.id }, data: { balance: { increment: balanceAdj } } });
     }
 
     const data = { ...fieldUpdates };
@@ -1253,7 +1255,6 @@ const finalizeCounterpartLegsOnEditApprove = async (tx, txn, book, approveHistor
     });
     if (!cur) continue;
 
-    const oldDelta = applyTxnBalanceForAddition(cur);
     const syncFields = {
       amount: source.amount,
       note: source.note,
@@ -1988,7 +1989,8 @@ app.get('/api/user/ai-config', authenticateToken, async (req, res) => {
     if (!cfg || !cfg.apiKey) {
       return res.json({ configured: false, config: null });
     }
-    return res.json({ configured: true, config: cfg });
+    const safeConfig = { ...cfg, apiKey: cfg.apiKey.substring(0, 4) + '...' + cfg.apiKey.slice(-4) };
+    return res.json({ configured: true, config: safeConfig });
   } catch (error) {
     console.error('[AI Config] Fetch error:', error);
     res.status(500).json({ error: 'Server error fetching AI configuration' });
@@ -2007,7 +2009,8 @@ app.put('/api/user/ai-config', authenticateToken, async (req, res) => {
       data: { aiConfig: normalized.config },
     });
 
-    res.json({ message: 'AI configuration saved', config: normalized.config });
+    const safeConfig = { ...normalized.config, apiKey: normalized.config.apiKey.substring(0, 4) + '...' + normalized.config.apiKey.slice(-4) };
+    res.json({ message: 'AI configuration saved', config: safeConfig });
   } catch (error) {
     console.error('[AI Config] Save error:', error);
     res.status(500).json({ error: 'Server error saving AI configuration' });
@@ -2101,7 +2104,7 @@ app.get('/api/users/search', authenticateToken, async (req, res) => {
           { phoneNumber: { endsWith: q.slice(-10) } },
         ],
       },
-      select: { id: true, name: true, phoneNumber: true, email: true, avatarUrl: true },
+      select: { id: true, name: true, avatarUrl: true },
       take: 20,
     });
 
@@ -2459,7 +2462,9 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
         });
 
         await prisma.book.update({ where: { id: bookId }, data: { balance: { decrement: parsedAmount } } });
-        await prisma.book.update({ where: { id: recipientBook.id }, data: { balance: { increment: parsedAmount } } });
+        if (initialStatus === 'approved') {
+          await prisma.book.update({ where: { id: recipientBook.id }, data: { balance: { increment: parsedAmount } } });
+        }
         await prisma.transaction.update({ where: { id: sourceTxn.id }, data: { linkedTransactionId: recipientTxn.id } });
         await prisma.transaction.update({ where: { id: recipientTxn.id }, data: { linkedTransactionId: sourceTxn.id } });
         await maybeMirrorOrgTxnToCreatorPersonal(prisma, {
@@ -2564,6 +2569,7 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
               chainType,
               clientRef: txnClientRef,
               linkedTransactionId: personalTxn.id,
+              isLiability: true,
               dateTime: txnDateTime
             }
           });
@@ -2692,7 +2698,9 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
           data: { bookId: recipientBook.id, amount: parsedAmount, type: 'income', note: note || '', category: 'Send', contact, recipientUserId: req.user.id, linkedTransactionId: null, createdById: req.user.id, reconStatus: initialStatus, chainId, chainType, dateTime: txnDateTime }
         });
         await prisma.book.update({ where: { id: bookId }, data: { balance: { decrement: parsedAmount } } });
-        await prisma.book.update({ where: { id: recipientBook.id }, data: { balance: { increment: parsedAmount } } });
+        if (initialStatus === 'approved') {
+          await prisma.book.update({ where: { id: recipientBook.id }, data: { balance: { increment: parsedAmount } } });
+        }
         await prisma.transaction.update({ where: { id: sourceTxn.id }, data: { linkedTransactionId: recipientTxn.id } });
         await prisma.transaction.update({ where: { id: recipientTxn.id }, data: { linkedTransactionId: sourceTxn.id } });
         await maybeMirrorOrgTxnToCreatorPersonal(prisma, {
@@ -3387,14 +3395,7 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
     }
 
     // Linked transaction/requires approval: transition to pending delete
-    let reversedBalance = book.balance;
-    if (txn.reconStatus !== 'rejected') {
-      if (txn.type === 'expense') {
-        reversedBalance += txn.amount;
-      } else if (txn.type === 'income') {
-        reversedBalance -= txn.amount;
-      }
-    }
+    // Balance logic calculated inside the transaction
 
     const pendingData = await buildChangeDeletePendingData(txn, book, req.user.id, {
       oldAmount: txn.amount,
@@ -3426,10 +3427,13 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
         },
       });
 
-      await prisma.book.update({
-        where: { id: book.id },
-        data: { balance: reversedBalance },
-      });
+      if (txn.reconStatus !== 'rejected') {
+        const balanceAdj = txn.type === 'expense' ? txn.amount : -txn.amount;
+        await prisma.book.update({
+          where: { id: book.id },
+          data: { balance: { increment: balanceAdj } },
+        });
+      }
 
       await syncCounterpartLegsForChangeDelete(prisma, txn, book, {
         pendingAction: 'delete',
@@ -3999,6 +4003,16 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
             }
           }
 
+          // ── Apply Balance for Recipient on Approval ──
+          if (txn.type === 'income') {
+            await tx.book.update({ where: { id: txn.bookId }, data: { balance: { increment: txn.amount } } });
+          } else if (txn.linkedTransactionId) {
+            const linkedFull = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { type: true, bookId: true, amount: true } });
+            if (linkedFull && linkedFull.type === 'income') {
+              await tx.book.update({ where: { id: linkedFull.bookId }, data: { balance: { increment: linkedFull.amount } } });
+            }
+          }
+
           // ── Auto-adjustment: deduct existing approved deficits from new fund release ──
           if (txn.type === 'income') {
             const isPersonalOwner = await tx.organizationMember.findFirst({
@@ -4241,12 +4255,15 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
         });
         if (updMain.count === 0) throw new Error('Concurrency conflict on reject');
 
-        // Use increment/decrement for balance (GAP 2.3 fix)
-        const balanceAdjustment = txn.type === 'expense' ? txn.amount : -txn.amount;
-        await tx.book.update({
-          where: { id: txn.bookId },
-          data: { balance: { increment: balanceAdjustment } }
-        });
+        // Only reverse balance if it was actually applied. Expenses are deducted immediately, but pending incomes are NOT incremented.
+        const shouldReverseMain = txn.type === 'expense' || txn.reconStatus === 'approved';
+        if (shouldReverseMain) {
+          const balanceAdjustment = txn.type === 'expense' ? txn.amount : -txn.amount;
+          await tx.book.update({
+            where: { id: txn.bookId },
+            data: { balance: { increment: balanceAdjustment } }
+          });
+        }
 
         // Handle linked transaction
         if (txn.linkedTransactionId) {
@@ -4284,11 +4301,14 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
                 }
               });
               if (updLink.count === 0) throw new Error('Concurrency conflict on linked reject');
-              const linkedBalanceAdj = linked.type === 'income' ? -linked.amount : linked.amount;
-              await tx.book.update({
-                where: { id: linked.bookId },
-                data: { balance: { increment: linkedBalanceAdj } }
-              });
+              const shouldReverseLinked = linked.type === 'expense' || linked.reconStatus === 'approved';
+              if (shouldReverseLinked) {
+                const linkedBalanceAdj = linked.type === 'income' ? -linked.amount : linked.amount;
+                await tx.book.update({
+                  where: { id: linked.bookId },
+                  data: { balance: { increment: linkedBalanceAdj } }
+                });
+              }
             }
           }
         }
@@ -4372,6 +4392,9 @@ app.post('/api/transactions/:id/retry', authenticateToken, async (req, res) => {
         }
 
         for (const ct of chainTxns) {
+          // Do not increment recipient balance for pending_recipient
+          if (ct.type === 'income') continue;
+          
           const balanceDelta = ct.type === 'expense' ? -ct.amount : ct.amount;
           await tx.book.update({
             where: { id: ct.bookId },
@@ -4416,8 +4439,9 @@ app.post('/api/transactions/:id/retry', authenticateToken, async (req, res) => {
             where: { id: txn.bookId },
             data: { balance: { increment: balanceDelta } }
           });
+          // Do not increment recipient balance for pending_recipient
           const linkedFull = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId } });
-          if (linkedFull) {
+          if (linkedFull && linkedFull.type !== 'income') {
             const linkedBalanceDelta = linkedFull.type === 'income' ? linkedFull.amount : -linkedFull.amount;
             await tx.book.update({
               where: { id: linkedFull.bookId },
