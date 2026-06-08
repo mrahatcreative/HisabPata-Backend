@@ -1213,7 +1213,8 @@ const syncCounterpartLegsForChangeDelete = async (tx, txn, book, opts, requester
     pendingData,
     fieldUpdates = {},
     historyEntry = null,
-    reverseBalanceOnRequest = false
+    reverseBalanceOnRequest = false,
+    keepReconStatus = false
   } = opts;
   const legs = await getCounterpartLegsForChangeDelete(txn, book, tx);
   for (const leg of legs) {
@@ -1238,7 +1239,9 @@ const syncCounterpartLegsForChangeDelete = async (tx, txn, book, opts, requester
 
     const data = { ...fieldUpdates };
     if (pendingAction) {
-      data.reconStatus = 'pending';
+      if (!keepReconStatus) {
+        data.reconStatus = 'pending';
+      }
       data.pendingAction = pendingAction;
       data.pendingData = pendingData;
     }
@@ -1256,6 +1259,10 @@ const deleteCounterpartLegsForChangeDelete = async (tx, txn, book) => {
     let adj = reverseTxnBalanceForRemoval(leg);
     if (leg.reconStatus === 'rejected') {
       adj = 0; // Already reversed when rejected
+    }
+    // For pending Send: income leg balance was never applied, skip reversal
+    if (leg.reconStatus === 'pending' && leg.type === 'income' && leg.category === 'Send') {
+      adj = 0;
     }
     if (adj !== 0) {
       await tx.book.update({
@@ -1640,8 +1647,7 @@ const fundSendRetryStatuses = (bypassOrgApproval, isSelfSend) => {
   if (isSelfSend && bypassOrgApproval) {
     return { personal: 'approved', fundOrg: 'approved', recipient: 'approved' };
   }
-  // Sender legs stay pending until the recipient accepts (no org-ledger approve step).
-  return { personal: 'pending_recipient', fundOrg: 'pending_recipient', recipient: 'pending_recipient' };
+  return { personal: 'pending', fundOrg: 'pending', recipient: 'pending' };
 };
 
 // Optimistic-locking update: only succeeds if version matches, then increments it.
@@ -2456,7 +2462,7 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
       const bypassRecipientOrgApproval = await checkApprovalBypass(recipientOrgId, req.user.id);
 
       const initialStatus =
-        bypassSourceOrgApproval && bypassRecipientOrgApproval ? 'approved' : 'pending_recipient';
+        bypassSourceOrgApproval && bypassRecipientOrgApproval ? 'approved' : 'pending';
 
       const result = await prisma.$transaction(async (prisma) => {
         const sourceTxn = await prisma.transaction.create({
@@ -2492,6 +2498,7 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
           }
         });
 
+        // Sender balance always applied on creation (counts even in pending)
         await prisma.book.update({ where: { id: bookId }, data: { balance: { decrement: parsedAmount } } });
         if (initialStatus === 'approved') {
           await prisma.book.update({ where: { id: recipientBook.id }, data: { balance: { increment: parsedAmount } } });
@@ -2510,7 +2517,7 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
       broadcast({ type: "data_changed" });
       const enriched = await enrichTxn(result);
 
-      if (initialStatus === 'pending_recipient') {
+      if (initialStatus === 'pending') {
         const recipientAdmins = await prisma.organizationMember.findMany({
           where: { organizationId: recipientOrgId, status: 'active', OR: [{ role: 'admin' }, { permissions: { has: 'edit_all' } }] },
           select: { userId: true }
@@ -2628,9 +2635,15 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
             }
           });
 
-          await prisma.book.update({ where: { id: bookId }, data: { balance: { decrement: parsedAmount } } });
-          await prisma.book.update({ where: { id: fundBook.id }, data: { balance: { decrement: parsedAmount } } });
-          await prisma.book.update({ where: { id: recipientBook.id }, data: { balance: { increment: parsedAmount } } });
+          if (personalStatus === 'approved') {
+            await prisma.book.update({ where: { id: bookId }, data: { balance: { decrement: parsedAmount } } });
+          }
+          if (fundOrgStatus === 'approved') {
+            await prisma.book.update({ where: { id: fundBook.id }, data: { balance: { decrement: parsedAmount } } });
+          }
+          if (recipientStatus === 'approved') {
+            await prisma.book.update({ where: { id: recipientBook.id }, data: { balance: { increment: parsedAmount } } });
+          }
 
           await prisma.transaction.update({
             where: { id: personalTxn.id },
@@ -2647,7 +2660,7 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
         broadcast({ type: 'data_changed' });
         const enriched = await enrichTxn(result);
 
-        if (recipientStatus === 'pending_recipient' && !isSelfSend) {
+        if (recipientStatus === 'pending' && !isSelfSend) {
           if (recipientUserId) {
             broadcastToUser(recipientUserId, { type: 'pending_send_received', transaction: enriched });
           } else if (recipientOrgId) {
@@ -2688,7 +2701,7 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
       // Determine initial state based on org approval policy
       let bypassOrgApproval = await checkApprovalBypass(book.organizationId, req.user.id);
       const isSelfSend = recipientUserId === req.user.id;
-      const initialStatus = (isSelfSend && bypassOrgApproval) ? 'approved' : 'pending_recipient';
+      const initialStatus = (isSelfSend && bypassOrgApproval) ? 'approved' : 'pending';
 
       // ── Chain / Split / Deficit logic when fund source is selected ──
       let chainId = null;
@@ -2728,6 +2741,7 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
         const recipientTxn = await prisma.transaction.create({
           data: { bookId: recipientBook.id, amount: parsedAmount, type: 'income', note: note || '', category: 'Send', contact, recipientUserId: req.user.id, linkedTransactionId: null, createdById: req.user.id, reconStatus: initialStatus, chainId, chainType, dateTime: txnDateTime }
         });
+        // Sender balance always applied on creation (counts even in pending)
         await prisma.book.update({ where: { id: bookId }, data: { balance: { decrement: parsedAmount } } });
         if (initialStatus === 'approved') {
           await prisma.book.update({ where: { id: recipientBook.id }, data: { balance: { increment: parsedAmount } } });
@@ -2764,8 +2778,8 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
         broadcastToUsers(adminIds, { type: "deficit_send", message: { bn: bnMsg, en: enMsg }, transaction: enriched });
       }
 
-      // Notify recipient when org approval was bypassed (skip for already-approved self-sends)
-      if (bypassOrgApproval && initialStatus !== 'approved') {
+      // Notify recipient
+      if (initialStatus !== 'approved') {
         broadcastToUser(recipientUserId, { type: "pending_send_received", transaction: enriched });
       }
       return res.status(201).json({ transaction: enriched, isHandshake: true, approvalBypassed: bypassOrgApproval });
@@ -2893,15 +2907,53 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
     const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
     if (!txn) return res.status(404).json({ error: 'Transaction not found' });
 
-    if (txn.reconStatus === 'rejected') {
-      return res.status(400).json({ error: 'Rejected transactions cannot be edited. Please retry or create a new one.' });
-    }
-
     const book = await prisma.book.findUnique({ where: { id: txn.bookId }, include: { organization: { select: { isPersonal: true } } } });
     if (!book) return res.status(404).json({ error: 'Book not found' });
 
-    if (!(await hasAdminOrEditorAccess(book.organizationId, req.user.id))) {
-      return res.status(403).json({ error: 'Only admins or editors can edit transactions' });
+    // ── Authorization: Who can edit? ──
+    // Sender (createdById) can always edit their own Send transactions.
+    // Receiver can NOT edit pending transactions.
+    // Org admins/editors retain full access.
+    const isSender = txn.createdById === req.user.id;
+    const isReceiver = txn.recipientUserId === req.user.id;
+    const isSend = txn.category === 'Send';
+    const isPending = txn.reconStatus === 'pending';
+    const isApproved = txn.reconStatus === 'approved';
+    const isRejected = txn.reconStatus === 'rejected';
+    const isAdminOrEditor = await hasAdminOrEditorAccess(book.organizationId, req.user.id);
+
+    if (isSend) {
+      // Send transaction rules
+      if (isPending) {
+        // Receiver cannot edit pending transactions
+        if (isReceiver) {
+          return res.status(403).json({ error: 'Receiver cannot edit a pending transaction' });
+        }
+        // Only sender or admin/editor can edit
+        if (!isSender && !isAdminOrEditor) {
+          return res.status(403).json({ error: 'Only the sender, admins, or editors can edit this transaction' });
+        }
+      } else if (isRejected) {
+        // Only sender or admin/editor can edit rejected
+        if (!isSender && !isAdminOrEditor) {
+          return res.status(403).json({ error: 'Only the sender, admins, or editors can edit a rejected transaction' });
+        }
+      } else if (isApproved) {
+        // Both parties can initiate edit on approved transactions
+        if (!isSender && !isReceiver && !isAdminOrEditor) {
+          return res.status(403).json({ error: 'Not authorized to edit this transaction' });
+        }
+      } else {
+        // Fallback: admin/editor only
+        if (!isAdminOrEditor) {
+          return res.status(403).json({ error: 'Only admins or editors can edit transactions' });
+        }
+      }
+    } else {
+      // Non-Send transactions: existing rule
+      if (!isAdminOrEditor) {
+        return res.status(403).json({ error: 'Only admins or editors can edit transactions' });
+      }
     }
 
     // If personal book txn has linked org txn, check if user is still a member of that org
@@ -2990,33 +3042,66 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
     }
 
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true } });
-    let mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
-    console.log(`[DEBUG] 2. Result of mustUseChangeDeleteApprovalFlow: ${mustApprove}`);
+
+    // ── Send transaction edit logic based on state ──
+    let mustApprove = false;
+    let isEditOnRejected = false;
+
+    if (isSend) {
+      if (isPending) {
+        // Pending Send: direct edit, no balance change needed
+        mustApprove = false;
+      } else if (isRejected) {
+        // Rejected Send: reset to pending with new values
+        mustApprove = false;
+        isEditOnRejected = true;
+      } else if (isApproved) {
+        // Approved Send: pending edit, other party must approve
+        mustApprove = true;
+      } else {
+        mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
+      }
+    } else {
+      mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
+    }
+
     const requiredApprovers = await getRequiredApproversForChangeDelete(txn, book, req.user.id);
-    console.log(`[DEBUG] 3. Result of getRequiredApproversForChangeDelete:`, requiredApprovers);
     if (mustApprove && requiredApprovers.length === 0) {
-      // Orphan: counterparty no longer exists — allow direct edit without approval
       mustApprove = false;
     }
 
     if (!mustApprove) {
       // Direct edit logic
       let balanceAdjustment = 0;
-      if (
-        txn.reconStatus !== 'rejected' &&
-        changes.amount !== undefined &&
-        changes.amount !== txn.amount
-      ) {
-        if (txn.type === 'expense') balanceAdjustment = txn.amount - parsedAmount;
-        else if (txn.type === 'income') balanceAdjustment = parsedAmount - txn.amount;
+      const isPendingOrRejectedSend = isSend && (isPending || isRejected);
+
+      // Balance counts in pending — adjust for amount changes or re-apply on retry
+      if (isPendingOrRejectedSend) {
+        if (isPending && changes.amount !== undefined && changes.amount !== txn.amount) {
+          // Pending: balance already applied, adjust for amount difference
+          if (txn.type === 'expense') balanceAdjustment = txn.amount - parsedAmount;
+          else if (txn.type === 'income') balanceAdjustment = parsedAmount - txn.amount;
+        } else if (isRejected) {
+          // Rejected retry: balance was reversed on reject, re-apply from scratch
+          if (txn.type === 'expense') {
+            balanceAdjustment = -parsedAmount;
+          }
+        }
+      } else {
+        if (
+          txn.reconStatus !== 'rejected' &&
+          changes.amount !== undefined &&
+          changes.amount !== txn.amount
+        ) {
+          if (txn.type === 'expense') balanceAdjustment = txn.amount - parsedAmount;
+          else if (txn.type === 'income') balanceAdjustment = parsedAmount - txn.amount;
+        }
       }
 
       let updated;
       try {
         updated = await prisma.$transaction(async (prisma) => {
-          const updatedTxn = await prisma.transaction.update({
-          where: { id: txnId },
-          data: {
+          const updateData = {
             ...changes,
             updateHistory: [
               ...(txn.updateHistory || []),
@@ -3024,36 +3109,54 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
                 timestamp: new Date().toISOString(),
                 userId: req.user.id,
                 userName: user?.name || 'Unknown',
-                action: 'edit',
+                action: isEditOnRejected ? 'edit_and_retry' : 'edit',
                 changes: { old: { amount: txn.amount, type: txn.type, category: txn.category, note: txn.note }, new: changes },
               },
             ],
-          },
-        });
+          };
 
-        if (balanceAdjustment !== 0) {
-          await prisma.book.update({ where: { id: book.id }, data: { balance: { increment: balanceAdjustment } } });
-        }
+          // If editing a rejected Send, reset to pending
+          if (isEditOnRejected) {
+            updateData.reconStatus = 'pending';
+            updateData.pendingAction = null;
+            updateData.pendingData = null;
+          }
 
-        const linkedChanges = {};
-        if (changes.amount !== undefined) linkedChanges.amount = parsedAmount;
-        if (changes.note !== undefined) linkedChanges.note = changes.note;
-        if (changes.category !== undefined) linkedChanges.category = changes.category;
-        if (Object.keys(linkedChanges).length > 0) {
-          await syncCounterpartLegsForChangeDelete(prisma, txn, book, {
-            fieldUpdates: linkedChanges,
-            historyEntry: {
-              timestamp: new Date().toISOString(),
-              userId: req.user.id,
-              userName: user?.name || 'Unknown',
-              action: 'edit (counterpart)',
-              changes: { new: linkedChanges }
+          const updatedTxn = await prisma.transaction.update({
+            where: { id: txnId },
+            data: updateData,
+          });
+
+          if (balanceAdjustment !== 0) {
+            await prisma.book.update({ where: { id: book.id }, data: { balance: { increment: balanceAdjustment } } });
+          }
+
+          // Sync counterpart legs
+          const linkedChanges = {};
+          if (changes.amount !== undefined) linkedChanges.amount = parsedAmount;
+          if (changes.note !== undefined) linkedChanges.note = changes.note;
+          if (changes.category !== undefined) linkedChanges.category = changes.category;
+          if (Object.keys(linkedChanges).length > 0) {
+            const counterpartUpdateData = { ...linkedChanges };
+            if (isEditOnRejected) {
+              counterpartUpdateData.reconStatus = 'pending';
+              counterpartUpdateData.pendingAction = null;
+              counterpartUpdateData.pendingData = null;
             }
-          }, req.user.id);
-        }
+            await syncCounterpartLegsForChangeDelete(prisma, txn, book, {
+              fieldUpdates: counterpartUpdateData,
+              historyEntry: {
+                timestamp: new Date().toISOString(),
+                userId: req.user.id,
+                userName: user?.name || 'Unknown',
+                action: isEditOnRejected ? 'edit_and_retry (counterpart)' : 'edit (counterpart)',
+                changes: { new: linkedChanges }
+              }
+            }, req.user.id);
+          }
 
-        return updatedTxn;
-      });
+          return updatedTxn;
+        });
       } catch (err) {
         console.error('Error during direct edit transaction sync:', err);
         return res.status(500).json({ error: 'Failed to process direct edit. Internal error.' });
@@ -3061,7 +3164,7 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
 
       broadcast({ type: 'data_changed' });
       const enriched = await enrichTxn(updated);
-      return res.json({ transaction: enriched, message: 'Transaction updated' });
+      return res.json({ transaction: enriched, message: isEditOnRejected ? 'Transaction retried with edits' : 'Transaction updated' });
     } else {
       // Pending edit request flow — balance must be read inside transaction
       console.log(`[DEBUG] 4. Before buildChangeDeletePendingData()`);
@@ -3092,31 +3195,40 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
         }
 
         console.log(`[DEBUG] 6. Before prisma.transaction.update()`);
+        const editUpdateData = {
+          ...changes,
+          pendingAction: 'edit',
+          pendingData,
+          updateHistory: [
+            ...(txn.updateHistory || []),
+            {
+              timestamp: new Date().toISOString(),
+              userId: req.user.id,
+              userName: user?.name || 'Unknown',
+              action: 'edit_request',
+              changes: { old: { amount: txn.amount, type: txn.type, category: txn.category, note: txn.note }, new: changes },
+            },
+          ],
+        };
+        // New flow for Send: keep reconStatus as 'approved', use pendingAction
+        // Old flow for non-Send: set reconStatus to 'pending'
+        if (!isSend) {
+          editUpdateData.reconStatus = 'pending';
+        }
         const updatedTxn = await prisma.transaction.update({
           where: { id: txnId },
-          data: {
-            ...changes,
-            reconStatus: 'pending',
-            pendingAction: 'edit',
-            pendingData,
-            updateHistory: [
-              ...(txn.updateHistory || []),
-              {
-                timestamp: new Date().toISOString(),
-                userId: req.user.id,
-                userName: user?.name || 'Unknown',
-                action: 'edit_request',
-                changes: { old: { amount: txn.amount, type: txn.type, category: txn.category, note: txn.note }, new: changes },
-              },
-            ],
-          },
+          data: editUpdateData,
         });
         console.log(`[DEBUG] 7. After prisma.transaction.update()`);
 
-        await prisma.book.update({
-          where: { id: book.id },
-          data: { balance: preTxnBalance },
-        });
+        // For Send transactions: don't reverse balance during pending edit
+        // (existing balance stays effective until edit is finally approved)
+        if (!isSend) {
+          await prisma.book.update({
+            where: { id: book.id },
+            data: { balance: preTxnBalance },
+          });
+        }
 
         const linkedChanges = {};
         if (changes.amount !== undefined) linkedChanges.amount = parsedAmount;
@@ -3135,7 +3247,8 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
             action: 'edit_request (counterpart)',
             changes: { new: linkedChanges }
           },
-          reverseBalanceOnRequest: true
+          reverseBalanceOnRequest: !isSend, // Don't reverse balance for Send during pending
+          keepReconStatus: isSend, // Send stays 'approved', uses pendingAction
         }, req.user.id);
         console.log(`[DEBUG] 9. After syncCounterpartLegsForChangeDelete()`);
 
@@ -3365,9 +3478,40 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
     const book = await prisma.book.findUnique({ where: { id: txn.bookId } });
     if (!book) return res.status(404).json({ error: 'Book not found' });
 
-    // Verify admin/editor access
-    if (!(await hasAdminOrEditorAccess(book.organizationId, req.user.id))) {
-      return res.status(403).json({ error: 'Only admins or editors can delete transactions' });
+    // ── Authorization: Who can delete? ──
+    const isSender = txn.createdById === req.user.id;
+    const isReceiver = txn.recipientUserId === req.user.id;
+    const isSend = txn.category === 'Send';
+    const isPending = txn.reconStatus === 'pending';
+    const isApproved = txn.reconStatus === 'approved';
+    const isRejected = txn.reconStatus === 'rejected';
+    const isAdminOrEditor = await hasAdminOrEditorAccess(book.organizationId, req.user.id);
+
+    if (isSend) {
+      if (isPending) {
+        if (isReceiver) {
+          return res.status(403).json({ error: 'Receiver cannot delete a pending transaction' });
+        }
+        if (!isSender && !isAdminOrEditor) {
+          return res.status(403).json({ error: 'Only the sender, admins, or editors can delete' });
+        }
+      } else if (isRejected) {
+        if (!isSender && !isAdminOrEditor) {
+          return res.status(403).json({ error: 'Only the sender, admins, or editors can delete a rejected transaction' });
+        }
+      } else if (isApproved) {
+        if (!isSender && !isReceiver && !isAdminOrEditor) {
+          return res.status(403).json({ error: 'Not authorized to delete this transaction' });
+        }
+      } else {
+        if (!isAdminOrEditor) {
+          return res.status(403).json({ error: 'Only admins or editors can delete transactions' });
+        }
+      }
+    } else {
+      if (!isAdminOrEditor) {
+        return res.status(403).json({ error: 'Only admins or editors can delete transactions' });
+      }
     }
 
     // If personal book txn has linked org txn, check if user is still a member of that org
@@ -3392,24 +3536,45 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
 
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true } });
     const org = bookOrg;
-    if (txn.pendingAction === 'delete') {
-      return res.status(400).json({ error: 'Deletion is already pending approval' });
+    if (txn.pendingAction) {
+      return res.status(400).json({ error: 'Transaction already has a pending action' });
     }
-    let mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
+
+    // ── Determine delete type based on state ──
+    let mustApprove = false;
+    if (isSend) {
+      if (isPending || isRejected) {
+        // Pending/Rejected Send: direct delete, no balance reversal needed
+        mustApprove = false;
+      } else if (isApproved) {
+        // Approved Send: pending delete, other party must approve
+        mustApprove = true;
+      } else {
+        mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
+      }
+    } else {
+      mustApprove = await mustUseChangeDeleteApprovalFlow(txn, book, req.user.id);
+    }
+
     const requiredApprovers = await getRequiredApproversForChangeDelete(txn, book, req.user.id);
     if (mustApprove && requiredApprovers.length === 0) {
-      // Orphan: counterparty no longer exists — allow direct delete without approval
       mustApprove = false;
     }
-    if (txn.reconStatus === 'rejected') {
-      mustApprove = false; // Dead transactions can be hard deleted directly
+    if (txn.reconStatus === 'rejected' && !isSend) {
+      mustApprove = false;
     }
 
     const executeHardDelete = async () => {
       await prisma.$transaction(async (prisma) => {
         let balanceAdjustment = reverseTxnBalanceForRemoval(txn);
-        if (txn.reconStatus === 'rejected') {
-          balanceAdjustment = 0; // Already reversed when rejected
+        // Pending Send: balance was applied (sender decrement) — reverse only if expense
+        // Rejected Send: balance already reversed on reject — skip
+        if (isSend && isRejected) {
+          balanceAdjustment = 0;
+        } else if (isSend && isPending && txn.type !== 'expense') {
+          balanceAdjustment = 0;
+        } else if (txn.reconStatus === 'rejected') {
+          balanceAdjustment = 0;
         }
         if (balanceAdjustment !== 0) {
           await prisma.book.update({ where: { id: book.id }, data: { balance: { increment: balanceAdjustment } } });
@@ -3425,9 +3590,7 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
       return res.json({ message: 'Transaction deleted', pending: false });
     }
 
-    // Linked transaction/requires approval: transition to pending delete
-    // Balance logic calculated inside the transaction
-
+    // Approved Send: transition to pending delete
     const pendingData = await buildChangeDeletePendingData(txn, book, req.user.id, {
       oldAmount: txn.amount,
       oldType: txn.type,
@@ -3439,10 +3602,10 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
     });
 
     await prisma.$transaction(async (prisma) => {
+      // Don't change reconStatus (stays 'approved'), just set pendingAction
       await prisma.transaction.update({
         where: { id: txnId },
         data: {
-          reconStatus: 'pending',
           pendingAction: 'delete',
           pendingData,
           updateHistory: [
@@ -3458,7 +3621,9 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
         },
       });
 
-      if (txn.reconStatus !== 'rejected') {
+      // For Send transactions: don't reverse balance during pending delete
+      // (balance stays effective until delete is finally approved)
+      if (!isSend && txn.reconStatus !== 'rejected') {
         const balanceAdj = txn.type === 'expense' ? txn.amount : -txn.amount;
         await prisma.book.update({
           where: { id: book.id },
@@ -3476,7 +3641,8 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
           action: 'delete_request (counterpart)',
           changes: { old: { amount: txn.amount, type: txn.type, category: txn.category, note: txn.note } }
         },
-        reverseBalanceOnRequest: true
+        reverseBalanceOnRequest: !isSend, // Don't reverse balance for Send during pending
+        keepReconStatus: isSend, // Send stays 'approved', uses pendingAction
       }, req.user.id);
     });
 
@@ -3626,16 +3792,22 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
       }
     }
 
-    // 2. Check if this is a pending_recipient creation step and the caller is NOT the recipient.
-    if (action === 'approve' && txn.reconStatus === 'pending_recipient') {
+    // 2. Check if this is a pending creation step and the caller is NOT the recipient.
+    if (action === 'approve' && (txn.reconStatus === 'pending' || txn.reconStatus === 'pending_recipient')) {
       let recipientUserId = null;
       let recipientOrgId = null;
       if (txn.type === 'expense' && txn.category === 'Send') {
         recipientUserId = txn.recipientUserId;
         recipientOrgId = txn.recipientOrgId;
+      } else if (txn.type === 'income' && txn.category === 'Send') {
+        recipientUserId = txn.recipientUserId;
+        recipientOrgId = txn.recipientOrgId;
       } else if (txn.linkedTransactionId) {
         const linked = await prisma.transaction.findUnique({ where: { id: txn.linkedTransactionId } });
         if (linked && linked.type === 'expense' && linked.category === 'Send') {
+          recipientUserId = linked.recipientUserId;
+          recipientOrgId = linked.recipientOrgId;
+        } else if (linked && linked.type === 'income' && linked.category === 'Send') {
           recipientUserId = linked.recipientUserId;
           recipientOrgId = linked.recipientOrgId;
         }
@@ -3996,8 +4168,8 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
         }
       }
 
-      // --- PENDING_RECIPIENT → approve (green) ---
-      if (txn.reconStatus === 'pending_recipient') {
+      // --- PENDING / PENDING_RECIPIENT → approve (green) ---
+      if (txn.reconStatus === 'pending' || txn.reconStatus === 'pending_recipient') {
         let fundSendRecipientResult = null;
         await prisma.$transaction(async (tx) => {
           if (txn.chainType === 'fund_send' && txn.chainId) {
@@ -4034,13 +4206,20 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
             }
           }
 
-          // ── Apply Balance for Recipient on Approval ──
+          // ── Apply Balance on Approval ──
+          // Sender was already decremented on creation (balance counts even in pending).
+          // Now only increment the receiver's income leg.
           if (txn.type === 'income') {
             await tx.book.update({ where: { id: txn.bookId }, data: { balance: { increment: txn.amount } } });
-          } else if (txn.linkedTransactionId) {
-            const linkedFull = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { type: true, bookId: true, amount: true } });
-            if (linkedFull && linkedFull.type === 'income') {
-              await tx.book.update({ where: { id: linkedFull.bookId }, data: { balance: { increment: linkedFull.amount } } });
+          } else if (txn.type === 'expense') {
+            // Expense leg on approve: decrement sender (if not already done on creation for legacy rows)
+            // and increment linked income (receiver)
+            await tx.book.update({ where: { id: txn.bookId }, data: { balance: { decrement: txn.amount } } });
+            if (txn.linkedTransactionId) {
+              const linkedFull = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { type: true, bookId: true, amount: true } });
+              if (linkedFull && linkedFull.type === 'income') {
+                await tx.book.update({ where: { id: linkedFull.bookId }, data: { balance: { increment: linkedFull.amount } } });
+              }
             }
           }
 
@@ -4235,7 +4414,26 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
     const book = await prisma.book.findUnique({ where: { id: txn.bookId } });
     if (!book) return res.status(404).json({ error: 'Book not found' });
 
-    if (!(await hasAdminOrEditorAccess(book.organizationId, req.user.id))) {
+    // Receiver can reject pending Send transactions
+    const isSend = txn.category === 'Send';
+    const isPending = txn.reconStatus === 'pending';
+    let isReceiver = false;
+    if (isSend && isPending) {
+      if (txn.recipientUserId) {
+        isReceiver = txn.recipientUserId === req.user.id;
+      } else if (txn.recipientOrgId) {
+        isReceiver = await checkPermission(txn.recipientOrgId, req.user.id, 'edit_all');
+      }
+      if (!isReceiver && txn.linkedTransactionId) {
+        const linked = await prisma.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { recipientUserId: true, recipientOrgId: true } });
+        if (linked) {
+          if (linked.recipientUserId) isReceiver = linked.recipientUserId === req.user.id;
+          else if (linked.recipientOrgId) isReceiver = await checkPermission(linked.recipientOrgId, req.user.id, 'edit_all');
+        }
+      }
+    }
+
+    if (!isReceiver && !(await hasAdminOrEditorAccess(book.organizationId, req.user.id))) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -4286,7 +4484,9 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
         });
         if (updMain.count === 0) throw new Error('Concurrency conflict on reject');
 
-        // Only reverse balance if it was actually applied. Expenses are deducted immediately, but pending incomes are NOT incremented.
+        // Pending & pending_recipient: sender expense was decremented on creation, reverse it.
+        // Approved: balance was fully applied, reverse it.
+        // Income leg on pending: was NOT incremented on creation, no reversal needed.
         const shouldReverseMain = txn.type === 'expense' || txn.reconStatus === 'approved';
         if (shouldReverseMain) {
           const balanceAdjustment = txn.type === 'expense' ? txn.amount : -txn.amount;
@@ -4388,7 +4588,7 @@ app.post('/api/transactions/:id/retry', authenticateToken, async (req, res) => {
     const bypassOrgApproval = await checkApprovalBypass(approvalOrgId, req.user.id);
     const isSend = txn.category === 'Send';
     const newStatus = isSend
-      ? 'pending_recipient'
+      ? 'pending'
       : (bypassOrgApproval ? 'approved' : 'pending_org');
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -4464,22 +4664,10 @@ app.post('/api/transactions/:id/retry', authenticateToken, async (req, res) => {
           if (updL.count === 0) throw new Error('Concurrency conflict on linked retry');
         }
 
-        if (isSend) {
-          const balanceDelta = txn.type === 'expense' ? -txn.amount : txn.amount;
-          await tx.book.update({
-            where: { id: txn.bookId },
-            data: { balance: { increment: balanceDelta } }
-          });
-          // Do not increment recipient balance for pending_recipient
-          const linkedFull = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId } });
-          if (linkedFull && linkedFull.type !== 'income') {
-            const linkedBalanceDelta = linkedFull.type === 'income' ? linkedFull.amount : -linkedFull.amount;
-            await tx.book.update({
-              where: { id: linkedFull.bookId },
-              data: { balance: { increment: linkedBalanceDelta } }
-            });
-          }
-        }
+        // Send transactions: no balance change on retry.
+        // Balance is applied atomically when the receiver approves.
+        // This ensures deterministic balance for both old (pending_recipient)
+        // and new (pending) flows.
       }
       }
 
@@ -4612,13 +4800,35 @@ app.get('/api/transactions/:bookId', authenticateToken, async (req, res) => {
 
     const whereClause = { bookId };
 
+    // Check if current user is the receiver of any Send transactions in this book
+    // If so, filter out rejected transactions (receiver doesn't see rejected)
+    const isPersonalOrg = org?.isPersonal === true;
+    const currentUserId = req.user.id;
+
     const transactions = await prisma.transaction.findMany({
-      where: whereClause,
+      where: {
+        ...whereClause,
+        // Filter out 'deleted' transactions for all users
+        NOT: { reconStatus: 'deleted' }
+      },
       orderBy: { dateTime: 'desc' }
     });
 
+    // If this is a personal book (likely receiver's book), filter out rejected Send incomes
+    // Receiver should not see rejected transactions per spec
+    let filteredTransactions = transactions;
+    if (isPersonalOrg) {
+      filteredTransactions = transactions.filter(txn => {
+        // For income Send on personal book: hide rejected
+        if (txn.type === 'income' && txn.category === 'Send' && txn.reconStatus === 'rejected') {
+          return false;
+        }
+        return true;
+      });
+    }
+
     // Enrich with recipient names and fund info using the shared helper
-    const enriched = await Promise.all(transactions.map(txn => enrichTxn(txn)));
+    const enriched = await Promise.all(filteredTransactions.map(txn => enrichTxn(txn)));
 
     res.json(enriched);
   } catch (error) {
