@@ -1641,7 +1641,8 @@ const approveFundSendRecipient = async (tx, txn, approveHistoryEntry) => {
   const { personalTxn, fundOrgTxn, recipientTxn } = resolveFundSendChainParts(chain);
   const clearCounter = { counterProposedAmount: null, counterProposedBy: null };
   const orgStillPending =
-    personalTxn?.reconStatus === 'pending_org' || fundOrgTxn?.reconStatus === 'pending_org';
+    personalTxn?.reconStatus === 'pending' || personalTxn?.reconStatus === 'pending_org' ||
+    fundOrgTxn?.reconStatus === 'pending' || fundOrgTxn?.reconStatus === 'pending_org';
 
   if (orgStillPending && recipientTxn) {
     await updateFundSendTxnStatus(tx, recipientTxn, 'pending', approveHistoryEntry, clearCounter);
@@ -3777,7 +3778,7 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
     }
 
     // Send on org/personal sender book: org admin must not approve — only the recipient accepts.
-    if (action === 'approve' && txn.category === 'Send' && txn.reconStatus === 'pending_org' && txn.type === 'expense') {
+    if (action === 'approve' && txn.category === 'Send' && (txn.reconStatus === 'pending' || txn.reconStatus === 'pending_org') && txn.type === 'expense') {
       const srcBook = await prisma.book.findUnique({
         where: { id: txn.bookId },
         include: { organization: { select: { isPersonal: true } } }
@@ -4293,7 +4294,7 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
           const orgSource = await resolveOrgSourceTxnForMirror(txn, tx);
           if (orgSource && orgSource.chainType !== 'fund_send') {
             const mirrorStatus =
-              fundSendRecipientResult && !fundSendRecipientResult.final ? 'pending_org' : 'approved';
+              fundSendRecipientResult && !fundSendRecipientResult.final ? 'pending' : 'approved';
             await syncCreatorPersonalMirrorStatus(tx, orgSource, mirrorStatus, approveHistoryEntry, {
               counterProposedAmount: null,
               counterProposedBy: null
