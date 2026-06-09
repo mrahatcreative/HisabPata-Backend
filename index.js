@@ -1613,9 +1613,16 @@ const approveFundSendOrg = async (tx, txn, approveHistoryEntry) => {
   const { personalTxn, fundOrgTxn, recipientTxn } = resolveFundSendChainParts(chain);
   const clearCounter = { counterProposedAmount: null, counterProposedBy: null };
 
-  if (recipientTxn?.reconStatus === 'pending_org') {
+  if (recipientTxn?.reconStatus === 'pending' || recipientTxn?.reconStatus === 'pending_org') {
     for (const t of chain) {
       await updateFundSendTxnStatus(tx, t, 'approved', approveHistoryEntry, clearCounter);
+    }
+    // Recipient already accepted — increment their income balance
+    if (recipientTxn && !recipientTxn.isLiability) {
+      await tx.book.update({
+        where: { id: recipientTxn.bookId },
+        data: { balance: { increment: recipientTxn.amount } }
+      });
     }
     return { final: true };
   }
@@ -1643,6 +1650,13 @@ const approveFundSendRecipient = async (tx, txn, approveHistoryEntry) => {
 
   for (const t of chain) {
     await updateFundSendTxnStatus(tx, t, 'approved', approveHistoryEntry, clearCounter);
+  }
+  // Recipient income was NOT incremented on creation — do it now on final approval
+  if (recipientTxn && !recipientTxn.isLiability) {
+    await tx.book.update({
+      where: { id: recipientTxn.bookId },
+      data: { balance: { increment: recipientTxn.amount } }
+    });
   }
   return { final: true };
 };
@@ -2639,12 +2653,9 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
             }
           });
 
-          if (personalStatus === 'approved') {
-            await prisma.book.update({ where: { id: bookId }, data: { balance: { decrement: parsedAmount } } });
-          }
-          if (fundOrgStatus === 'approved') {
-            await prisma.book.update({ where: { id: fundBook.id }, data: { balance: { decrement: parsedAmount } } });
-          }
+          // Sender & fund org balance always applied on creation (counts even in pending)
+          await prisma.book.update({ where: { id: bookId }, data: { balance: { decrement: parsedAmount } } });
+          await prisma.book.update({ where: { id: fundBook.id }, data: { balance: { decrement: parsedAmount } } });
           if (recipientStatus === 'approved') {
             await prisma.book.update({ where: { id: recipientBook.id }, data: { balance: { increment: parsedAmount } } });
           }
@@ -4223,15 +4234,12 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
           // Now only increment the receiver's income leg.
           if (txn.type === 'income') {
             await tx.book.update({ where: { id: txn.bookId }, data: { balance: { increment: txn.amount } } });
-          } else if (txn.type === 'expense') {
-            // Expense leg on approve: decrement sender (if not already done on creation for legacy rows)
-            // and increment linked income (receiver)
-            await tx.book.update({ where: { id: txn.bookId }, data: { balance: { decrement: txn.amount } } });
-            if (txn.linkedTransactionId) {
-              const linkedFull = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { type: true, bookId: true, amount: true } });
-              if (linkedFull && linkedFull.type === 'income') {
-                await tx.book.update({ where: { id: linkedFull.bookId }, data: { balance: { increment: linkedFull.amount } } });
-              }
+          } else if (txn.type === 'expense' && txn.linkedTransactionId) {
+            // Sender already decremented on creation — no change.
+            // Increment the linked income (receiver) if not yet approved.
+            const linkedFull = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { type: true, bookId: true, amount: true } });
+            if (linkedFull && linkedFull.type === 'income') {
+              await tx.book.update({ where: { id: linkedFull.bookId }, data: { balance: { increment: linkedFull.amount } } });
             }
           }
 
@@ -4322,39 +4330,6 @@ app.post('/api/transactions/:id/action', authenticateToken, async (req, res) => 
 
         broadcast({ type: "data_changed" });
         return res.json({ message: 'Transaction fully approved' });
-      }
-
-      // Legacy: handle old 'pending' reconStatus for backward compat
-      if (txn.reconStatus === 'pending') {
-        if (txn.orgFundId) {
-          const updated = await updateTxnWithVersion(txnId, txn.version, { reconStatus: 'approved' });
-          broadcast({ type: "data_changed" });
-          return res.json({ transaction: updated, message: 'Voucher approved' });
-        }
-        if (txn.category === 'Send' && txn.recipientUserId) {
-          await prisma.$transaction(async (tx) => {
-            const main = await tx.transaction.findUnique({ where: { id: txnId }, select: { version: true } });
-            if (!main) throw new Error('Transaction not found');
-            const upd1 = await tx.transaction.updateMany({
-              where: { id: txnId, version: main.version },
-              data: { reconStatus: 'approved', counterProposedAmount: null, counterProposedBy: null, version: { increment: 1 } }
-            });
-            if (upd1.count === 0) throw new Error('Concurrency conflict on legacy pending approve');
-            if (txn.linkedTransactionId) {
-              const linked = await tx.transaction.findUnique({ where: { id: txn.linkedTransactionId }, select: { version: true } });
-              if (linked) {
-                const upd2 = await tx.transaction.updateMany({
-                  where: { id: txn.linkedTransactionId, version: linked.version },
-                  data: { reconStatus: 'approved', category: 'Send', counterProposedAmount: null, counterProposedBy: null, version: { increment: 1 } }
-                });
-                if (upd2.count === 0) throw new Error('Concurrency conflict on linked legacy pending approve');
-              }
-            }
-          });
-          const updated = await prisma.transaction.findUnique({ where: { id: txnId } });
-          broadcast({ type: "data_changed" });
-          return res.json({ transaction: updated, message: 'Disbursement approved' });
-        }
       }
 
       return res.status(400).json({ error: 'Transaction not eligible for approval' });
@@ -7211,6 +7186,12 @@ app.post('/api/ai/execute', authenticateToken, async (req, res) => {
         }
 
         transaction = await prisma.transaction.create({ data: txnData });
+
+        // Sender balance decremented on creation (counts even in pending)
+        await prisma.book.update({
+          where: { id: book.id },
+          data: { balance: { decrement: parsedAmount } },
+        });
 
         if (recipientBook) {
           const linkedTxn = await prisma.transaction.create({
