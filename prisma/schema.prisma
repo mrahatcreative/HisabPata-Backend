@@ -8,20 +8,21 @@ datasource db {
 }
 
 model User {
-  id           String               @id @default(cuid())
-  name         String
-  email        String?              @unique
-  phoneNumber  String?
-  password     String
-  tokenVersion Int                  @default(0)
-  avatarUrl    String?
-  isAdmin      Boolean              @default(false)
-  aiConfig     Json?
+  id            String               @id @default(cuid())
+  name          String
+  email         String?              @unique
+  phoneNumber   String?
+  password      String
+  tokenVersion  Int                  @default(0)
+  avatarUrl     String?
+  isAdmin       Boolean              @default(false)
+  aiConfig      Json?
   aiChatMessages AiChatMessage[]
-  memberships  OrganizationMember[]
-  complaints   Complaint[]
-  audioNotes   AudioNote[]
-  createdAt    DateTime             @default(now())
+  memberships   OrganizationMember[]
+  complaints    Complaint[]
+  audioNotes    AudioNote[]
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
 }
 
 model AiChatMessage {
@@ -42,7 +43,7 @@ model AiChatMessage {
 model Complaint {
   id         String   @id @default(cuid())
   userId     String
-  user       User     @relation(fields: [userId], references: [id])
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   subject    String
   message    String
   status     String   @default("open")
@@ -53,20 +54,26 @@ model Complaint {
   imageUrls  String[]
   videoUrls  String[]
   createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([assignedTo])
 }
 
 model Organization {
-  id                String               @id @default(cuid())
-  name              String
-  isPersonal        Boolean              @default(false)
-  inviteCode        String?              @unique
-  imageUrl          String?
-  categories        String[]
-  approvalPolicy    String               @default("GLOBALLY_ON")
-  whitelistedUserIds String[]
-  members           OrganizationMember[]
-  books             Book[]
-  createdAt         DateTime             @default(now())
+  id                 String               @id @default(cuid())
+  name               String
+  isPersonal         Boolean              @default(false)
+  inviteCode         String?              @unique
+  imageUrl           String?
+  categories         String[]             @default([])
+  approvalPolicy     String               @default("GLOBALLY_ON")
+  whitelistedUserIds String[]             @default([])
+  members            OrganizationMember[]
+  books              Book[]
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
 }
 
 model OrganizationMember {
@@ -76,11 +83,13 @@ model OrganizationMember {
   role           String       @default("member")
   status         String       @default("pending")
   permissions    String[]
-  user           User         @relation(fields: [userId], references: [id])
-  organization   Organization @relation(fields: [organizationId], references: [id])
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   createdAt      DateTime     @default(now())
 
   @@unique([userId, organizationId])
+  @@index([organizationId])
+  @@index([status])
 }
 
 model Book {
@@ -90,9 +99,13 @@ model Book {
   isActive       Boolean      @default(true)
   balance        Float        @default(0)
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   transactions   Transaction[]
   createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId])
+  @@index([organizationId, isActive])
 }
 
 model Transaction {
@@ -107,11 +120,14 @@ model Transaction {
   recipientOrgId      String?
   linkedTransactionId String?
   orgFundId           String?
+  fundType            String?
+  fromLocation        String?
+  toLocation          String?
   imageUrl            String?
   reconStatus         String   @default("approved")
   pendingAction       String?
-  pendingData         Json?
-  updateHistory       Json[]
+  pendingData         Json?    @db.JsonB
+  updateHistory       Json[]             @default([])
   dateTime            DateTime @default(now())
   status              String?
   createdById         String?
@@ -123,17 +139,73 @@ model Transaction {
   adjustedAmount      Float?
   version             Int      @default(1)
   clientRef           String?
-  book                Book     @relation(fields: [bookId], references: [id])
+  book                Book     @relation(fields: [bookId], references: [id], onDelete: Restrict)
   createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // ── Core FK lookups ──
+  @@index([bookId])
+  @@index([linkedTransactionId])
+  @@index([chainId])
+  @@index([orgFundId])
+  @@index([createdById])
+
+  // ── Role-based lookups ──
+  @@index([recipientUserId])
+  @@index([recipientOrgId])
+
+  // ── Status-based filtering ──
+  @@index([reconStatus])
+  @@index([pendingAction])
+
+  // ── Composite: book listing (most frequent query) ──
+  @@index([bookId, dateTime(sort: Desc)])
+  @@index([bookId, reconStatus, dateTime(sort: Desc)])
+
+  // ── Chain queries ──
+  @@index([chainId, reconStatus])
+
+  // ── Approval queries ──
+  @@index([reconStatus, bookId])
+  @@index([reconStatus, createdById])
 }
 
 model AudioNote {
   id         String   @id @default(cuid())
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  audioUrl   String?  // the URL or path to the saved audio file
-  text       String?  // transcribed text
-  status     String   @default("pending") // pending, processed, error
-  recordedAt DateTime @default(now()) // When the user actually recorded it offline
-  createdAt  DateTime @default(now()) // When it was synced to server
+  audioUrl   String?
+  text       String?
+  status     String   @default("pending")
+  recordedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([status])
+}
+
+model Notification {
+  id                   String   @id @default(cuid())
+  userId               String
+  type                 String
+  title                String?
+  message              String?
+  relatedTransactionId String?
+  relatedOrgId         String?
+  isRead               Boolean  @default(false)
+  createdAt            DateTime @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, isRead])
+}
+
+model Category {
+  id          String   @id @default(cuid())
+  userId      String?
+  name        String
+  type        String   // INCOME or EXPENSE
+  isPermanent Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
 }
