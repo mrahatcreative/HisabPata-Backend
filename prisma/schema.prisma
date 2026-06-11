@@ -193,10 +193,37 @@ model Notification {
   relatedTransactionId String?
   relatedOrgId         String?
   isRead               Boolean  @default(false)
+  isDeleted            Boolean  @default(false)
   createdAt            DateTime @default(now())
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([userId, isRead])
+  @@index([userId, isDeleted])
+  @@index([createdAt])
+}
+
+model NotificationPreference {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  pushEnabled       Boolean @default(true)
+  emailEnabled      Boolean @default(true)
+  inAppEnabled      Boolean @default(true)
+
+  @@unique([userId, type])
+  @@index([userId])
+}
+
+model FcmToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String
+  deviceInfo String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([token])
+  @@index([userId])
 }
 
 model Category {

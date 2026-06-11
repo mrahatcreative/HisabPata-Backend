@@ -1,6 +1,5 @@
 const { prisma } = require('../config/database');
 const { CREATOR_PERSONAL_MIRROR_SUFFIX } = require('../config/constants');
-const { hasAdminOrEditorAccess } = require('./access');
 
 const findCreatorPersonalMirror = async (orgTxn, txClient = prisma) => {
   if (!orgTxn?.clientRef) return null;
@@ -105,7 +104,6 @@ const maybeMirrorOrgTxnToCreatorPersonal = async (tx, {
   skipMirror = false
 }) => {
   if (skipMirror || orgTxn.type !== 'expense' || orgBook.organization?.isPersonal) return null;
-  if (!(await hasAdminOrEditorAccess(orgBook.organizationId, userId))) return null;
   const personalBook = await getUserPersonalBook(userId, tx);
   if (!personalBook) return null;
   return createCreatorPersonalMirror(tx, {

@@ -1,279 +1,19 @@
-const { prisma } = require('../../config/database');
-
-const AI_ACTION_BLOCK_REGEX = /```action\s*([\s\S]*?)```/g;
-
-const stripAiActionBlocks = (text) => (text || '').replace(AI_ACTION_BLOCK_REGEX, '').trim();
-
-const getLastUserMessage = (messages) => {
-  const last = [...(messages || [])].reverse().find(m => m.role === 'user');
-  return (last?.content || '').trim();
-};
-
-const extractTransactionPreviewNotes = (aiResponseText) => {
-  const regex = /\[DATA type:transactions\]([\s\S]*?)\[\/DATA\]/g;
-  const previews = [];
-  for (const match of aiResponseText.matchAll(regex)) {
-    try {
-      const items = JSON.parse(match[1].trim());
-      if (Array.isArray(items)) {
-        for (const item of items) {
-          if (item && typeof item === 'object') previews.push(item);
-        }
-      }
-    } catch (_) { /* skip malformed preview blocks */ }
-  }
-  return previews;
-};
-
-const resolveAiTransactionNote = ({ note, description, amount, previewNotes, lastUserMessage, category }) => {
-  const direct = (note || description || '').trim();
-  if (direct) return direct;
-
-  const parsedAmount = parseFloat(amount);
-  if (Number.isFinite(parsedAmount) && previewNotes?.length) {
-    const match = previewNotes.find(
-      p => p?.note && Math.abs(parseFloat(p.amount) - parsedAmount) < 0.01
-    );
-    if (match?.note) return String(match.note).trim();
-    if (previewNotes.length === 1 && previewNotes[0]?.note) {
-      return String(previewNotes[0].note).trim();
-    }
-  }
-
-  if (lastUserMessage) return lastUserMessage;
-  return (category || 'General').trim();
-};
-
-const normalizeForBookMatch = (s) =>
-  String(s || '').toLowerCase().replace(/[^\w\u0980-\u09ff]/gi, '').trim();
-
-const matchBookFromUserMessage = (text, booksWithOrg) => {
-  const q = normalizeForBookMatch(text);
-  if (!q || !booksWithOrg?.length) return null;
-
-  let best = null;
-  let bestScore = 0;
-
-  for (const entry of booksWithOrg) {
-    const name = normalizeForBookMatch(entry.book.name);
-    if (!name || name.length < 2) continue;
-
-    if (q.includes(name) || name.includes(q)) {
-      return entry;
-    }
-
-    const nameWords = String(entry.book.name || '')
-      .toLowerCase()
-      .split(/[\s_\-]+/)
-      .filter((w) => w.length >= 2);
-    for (const word of nameWords) {
-      const nw = normalizeForBookMatch(word);
-      if (nw.length >= 3 && q.includes(nw)) {
-        const score = nw.length + 10;
-        if (score > bestScore) {
-          bestScore = score;
-          best = entry;
-        }
-      }
-    }
-
-    if (/উইক|week|weekly/i.test(q) && /week|উইক|weekly/i.test(name)) {
-      const score = 12;
-      if (score > bestScore) {
-        bestScore = score;
-        best = entry;
-      }
-    }
-    if (/নোট|note|notebook/i.test(q) && /note|নোট|book/i.test(name)) {
-      const score = 6;
-      if (score > bestScore) {
-        bestScore = score;
-        best = entry;
-      }
-    }
-  }
-  return best;
-};
-
-const detectAiIntent = (messages) => {
-  const lastUser = [...(messages || [])].reverse().find(m => m.role === 'user');
-  const q = (lastUser?.content || '').toLowerCase();
-
-  if (
-    /(balance|ব্যালেন্স|balence|মোট ব্যালেন্স|total balance|কত টাকা|how much money|জমা|deposit|স্থিতি|বাকি|টাকা আছে|কত আছে|কি আছে|আছে কি|কত টাকা)/i.test(
-      q
-    )
-  ) {
-    return 'balance';
-  }
-  if (
-    /(খাতায়|বইতে|book|notebook|নোটবুক|উইক|week)/i.test(q) &&
-    /(কত|আছে|জমা|টাকা|balance|খরচ|আয়|income|expense)/i.test(q)
-  ) {
-    return 'balance';
-  }
-  if (/(category|ক্যাটাগরি|খরচের হার|spending breakdown|বিভাগে খরচ|কোন খাতে)/i.test(q)) {
-    return 'category';
-  }
-  if (/(recent|সাম্প্রতিক|latest|গত|last \d+|লেনদেন দেখ|transaction list|লেনদেন তালিকা)/i.test(q)) {
-    return 'recent';
-  }
-  if (/(help|সাহায্য|কী কর|ki korte|how to|কিভাবে)/i.test(q) && !/\d/.test(q)) {
-    return 'help';
-  }
-  if (/\d/.test(q) && /(খরচ|expense|income|আয়|লেনদেন|record|যোগ|add|rickshaw|রিকশা|bazar|বাজার|send|পাঠ)/i.test(q)) {
-    return 'transaction';
-  }
-  if (/(কুইক নোট|quick note|voice note|ভয়েস নোট).*(বিশ্লেষণ|পড়|analyze|read|summary|সারাংশ|এন্ট্রি|entry|লেনদেন)/i.test(q)) {
-    return 'general';
-  }
-  return 'general';
-};
-
-const AI_LLM_HISTORY_LIMIT = 6;
-const AI_LLM_CONTENT_LIMIT = 1800;
-const GEMINI_DEFAULT_BASE = 'https://generativelanguage.googleapis.com';
-
-const normalizeGeminiBaseUrl = (baseUrl) => {
-  if (!baseUrl || typeof baseUrl !== 'string') return null;
-  let base = baseUrl.trim().replace(/\/+$/, '');
-  if (!base) return null;
-  base = base.replace(/\/v1beta(\/.*)?$/i, '');
-  return base;
-};
-
-const buildGeminiRequestUrl = (baseUrl, model, mode, apiKey) => {
-  const base = normalizeGeminiBaseUrl(baseUrl) || GEMINI_DEFAULT_BASE;
-  const endpoint = mode === 'stream' ? 'streamGenerateContent' : 'generateContent';
-  const query = mode === 'stream'
-    ? `alt=sse&key=${encodeURIComponent(apiKey)}`
-    : `key=${encodeURIComponent(apiKey)}`;
-  return `${base}/v1beta/models/${encodeURIComponent(model)}:${endpoint}?${query}`;
-};
-
-const safeFetchJson = async (res) => {
-  const text = await res.text();
-  if (!text) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { error: { message: text.slice(0, 300) } };
-  }
-};
-
-const geminiTextFromResponse = (data) => {
-  const parts = data?.candidates?.[0]?.content?.parts;
-  if (!Array.isArray(parts)) return '';
-  return parts.map((p) => (typeof p?.text === 'string' ? p.text : '')).join('');
-};
-
-const isGeminiThinkingModel = (model) => /gemini-2\.5|gemini-3/i.test(String(model || ''));
-
-const resolveAiMaxTokens = (maxTokens, model = '', provider = '') => {
-  const parsed = maxTokens != null ? parseInt(maxTokens, 10) : 512;
-  const safe = Number.isFinite(parsed) ? parsed : 512;
-  if (provider === 'gemini' && isGeminiThinkingModel(model)) {
-    return Math.min(Math.max(safe, 2048), 8192);
-  }
-  return Math.min(Math.max(safe, 256), 2048);
-};
-
-const truncateAiMessagesForLlm = (messages, maxCount = AI_LLM_HISTORY_LIMIT) => {
-  if (!Array.isArray(messages)) return [];
-  return messages.slice(-maxCount).map(m => ({
-    role: m.role,
-    content: String(m.content || '').slice(0, AI_LLM_CONTENT_LIMIT),
-  }));
-};
-
-const saveAiChatTurn = async ({ userId, userMessage, assistantMessage, bookId, model, provider, intent }) => {
-  const userText = String(userMessage || '').trim();
-  const assistantText = String(assistantMessage || '').trim();
-  if (!userId || !userText || !assistantText) return;
-  try {
-    await prisma.aiChatMessage.createMany({
-      data: [
-        { userId, role: 'user', content: userText, bookId: bookId || null, model: model || null, provider: provider || null, intent: intent || null },
-        { userId, role: 'assistant', content: assistantText, bookId: bookId || null, model: model || null, provider: provider || null, intent: intent || null },
-      ],
-    });
-  } catch (error) {
-    console.error('[AI Chat] Failed to save turn:', error);
-  }
-};
-
-const isBanglaMessage = (text) => /[\u0980-\u09FF]/.test(text || '');
-
-const CATEGORY_KEYWORDS = [
-  { keys: ['rickshaw', 'রিকশা', 'bus', 'বাস', 'transport', 'যাতায়াত', 'pathao', 'uber', 'cng'], cat: 'Transport' },
-  { keys: ['food', 'খাবার', 'breakfast', 'lunch', 'dinner', 'snack', 'নাস্তা'], cat: 'Food' },
-  { keys: ['bazar', 'বাজার', 'market', 'grocery', 'সবজি'], cat: 'Shopping' },
-  { keys: ['bill', 'বিল', 'electric', 'gas', 'internet', 'mobile'], cat: 'Bills' },
-  { keys: ['salary', 'বেতন', 'income', 'আয়', 'donation', 'দান'], cat: 'Income' },
-  { keys: ['medicine', 'doctor', 'চিকিৎসা', 'hospital'], cat: 'Medical' },
-  { keys: ['education', 'school', 'college', 'শিক্ষা', 'book'], cat: 'Education' },
-];
-
-const parseTransactionHints = (text, booksWithOrg, defaultBookId) => {
-  const q = (text || '').toLowerCase();
-  const amountMatch = (text || '').match(/(\d+(?:[.,]\d+)?)\s*(?:টাকা|taka|tk|bdt|৳)?/i);
-  const amount = amountMatch ? parseFloat(String(amountMatch[1]).replace(',', '')) : null;
-
-  let type = 'expense';
-  if (/(income|আয়|salary|বেতন|received|পেলাম|জমা|donation|দান)/i.test(text || '')) {
-    type = 'income';
-  }
-
-  let category = type === 'income' ? 'Income' : 'General';
-  for (const { keys, cat } of CATEGORY_KEYWORDS) {
-    if (keys.some(k => q.includes(k.toLowerCase()))) {
-      category = cat;
-      break;
-    }
-  }
-
-  let matchedEntry = matchBookFromUserMessage(text, booksWithOrg);
-  if (!matchedEntry) {
-    for (const entry of booksWithOrg) {
-      const name = entry.book.name.toLowerCase();
-      if (name.length > 2 && q.includes(name)) {
-        matchedEntry = entry;
-        break;
-      }
-    }
-  }
-  if (!matchedEntry && /(personal|পার্সোনাল|personal book|নিজের)/i.test(text || '')) {
-    matchedEntry = booksWithOrg.find(x => x.isPersonal) || null;
-  }
-  if (!matchedEntry && defaultBookId) {
-    matchedEntry = booksWithOrg.find(x => x.book.id === defaultBookId) || null;
-  }
-
-  return {
-    amount,
-    type,
-    category,
-    bookId: matchedEntry?.book.id || null,
-    bookName: matchedEntry?.book.name || null,
-    orgName: matchedEntry?.orgName || null,
-    isPersonal: matchedEntry?.isPersonal ?? null,
-  };
-};
-
-const resolveBookFromMessage = (text, booksWithOrg, defaultBookId) => {
-  const hints = parseTransactionHints(text, booksWithOrg, defaultBookId);
-  return hints.bookId || defaultBookId || null;
-};
-
-const formatTransactionsDataBlock = (transactions) => {
-  const payload = transactions.map(t => ({
-    note: t.note || t.category || '',
-    amount: t.amount,
-    type: t.type || 'expense',
-    category: t.category || 'General',
-  }));
-  return `[DATA type:transactions]\n${JSON.stringify(payload)}\n[/DATA]`;
-};
+const { prisma } = require('../../../config/database');
+const {
+  getLastUserMessage,
+  detectAiIntent,
+  parseTransactionHints,
+  resolveBookFromMessage,
+  extractTransactionPreviewNotes,
+  stripAiActionBlocks,
+  AI_ACTION_BLOCK_REGEX,
+  resolveAiTransactionNote,
+} = require('./parse');
+const {
+  formatBalanceDataBlock,
+  formatTransactionsDataBlock,
+} = require('./format');
+const { saveAiChatTurn } = require('./chat');
 
 const buildTransactionAction = (hints, lastUserMessage, bookRecord) => ({
   action: 'create_transaction',
@@ -302,11 +42,6 @@ const buildTransactionAction = (hints, lastUserMessage, bookRecord) => ({
 
 const tryDeterministicAiResponse = async (messages, agentCtx, userId) => {
   return { handled: false };
-};
-
-const formatBalanceDataBlock = (books) => {
-  const payload = books.map(b => ({ book: b.name, balance: b.balance, org: b.organization }));
-  return `[DATA type:balance]\n${JSON.stringify(payload)}\n[/DATA]`;
 };
 
 const prepareAiAgentRequest = async (userId, bookId, messages) => {
@@ -557,42 +292,11 @@ const emitAiStreamFinal = async (sendEvent, fullText, agentCtx, userId, messages
   });
 };
 
-async function loadUserAiConfig(userId) {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { aiConfig: true },
-  });
-  return user?.aiConfig || null;
-}
-
-function resolveAiRequestConfig(body, storedConfig) {
-  const cfg = storedConfig && typeof storedConfig === 'object' ? storedConfig : {};
-  return {
-    provider: body.provider || cfg.provider,
-    apiKey: body.apiKey || cfg.apiKey,
-    model: body.model || cfg.selectedModel,
-    baseUrl: body.baseUrl || cfg.baseUrl || null,
-    temperature: body.temperature != null ? parseFloat(body.temperature) : cfg.temperature,
-    maxTokens: body.maxTokens != null ? parseInt(body.maxTokens, 10) : cfg.maxTokens,
-  };
-}
-
 module.exports = {
-  prisma,
-  getLastUserMessage,
-  saveAiChatTurn,
-  prepareAiAgentRequest,
+  buildTransactionAction,
   tryDeterministicAiResponse,
+  prepareAiAgentRequest,
+  parseAiAgentActions,
   finalizeAiAgentResponse,
   emitAiStreamFinal,
-  loadUserAiConfig,
-  resolveAiRequestConfig,
-  truncateAiMessagesForLlm,
-  resolveAiMaxTokens,
-  buildGeminiRequestUrl,
-  safeFetchJson,
-  geminiTextFromResponse,
-  isGeminiThinkingModel,
-  formatBalanceDataBlock,
-  formatTransactionsDataBlock,
 };

@@ -1,4 +1,6 @@
 const { prisma } = require('../config/database');
+const { broadcastToUser } = require('../websocket');
+const { sendPushNotification } = require('../services/fcm');
 
 const parsePendingData = (pendingData) => {
   if (!pendingData) return {};
@@ -7,7 +9,7 @@ const parsePendingData = (pendingData) => {
 
 const createNotification = async (userId, type, title, message, relatedTransactionId, relatedOrgId) => {
   try {
-    await prisma.notification.create({
+    const notif = await prisma.notification.create({
       data: {
         userId,
         type,
@@ -17,8 +19,24 @@ const createNotification = async (userId, type, title, message, relatedTransacti
         relatedOrgId: relatedOrgId || null,
       }
     });
+    broadcastToUser(userId, { type: 'new_notification', notification: notif });
+
+    const pref = await prisma.notificationPreference.findUnique({
+      where: { userId_type: { userId, type } }
+    });
+    if (!pref || pref.pushEnabled !== false) {
+      await sendPushNotification(userId, title || type, message || '', {
+        notificationId: notif.id,
+        type,
+        relatedTransactionId: relatedTransactionId || '',
+        relatedOrgId: relatedOrgId || '',
+      });
+    }
+
+    return notif;
   } catch (e) {
     console.error('Failed to create notification:', e);
+    return null;
   }
 };
 

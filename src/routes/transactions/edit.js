@@ -285,6 +285,10 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
 
       broadcast({ type: 'data_changed' });
       const enriched = await enrichTxn(updated);
+      const recipientId = txn.recipientUserId || updated.recipientUserId;
+      if (recipientId && recipientId !== req.user.id) {
+        await createNotification(recipientId, 'EDIT_COMPLETED', 'লেনদেন সম্পাদিত', `${user?.name || 'কেউ'} লেনদেনটি সম্পাদনা করেছেন।`, txnId, book.organizationId);
+      }
       return res.json({ transaction: enriched, message: isEditOnRejected ? 'Transaction retried with edits' : 'Transaction updated' });
     } else {
       // Pending edit request flow — balance must be read inside transaction

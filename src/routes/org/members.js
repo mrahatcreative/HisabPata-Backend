@@ -50,6 +50,12 @@ app.post('/api/org/join', authenticateToken, async (req, res) => {
       }
     });
 
+    const adminIds = await getOrgAdminUserIds(organization.id);
+    const userName = req.user.name || 'কেউ';
+    for (const adminId of adminIds) {
+      await createNotification(adminId, 'MEMBERSHIP_REQUESTED', 'সদস্যপদের অনুরোধ', `${userName} সংগঠনে যোগ দিতে চান।`, null, organization.id);
+    }
+
     res.json({ message: 'Join request submitted. Waiting for admin approval.', membership: { ...membership, organization } });
   } catch (error) {
     console.error('Join org error:', error);
@@ -92,6 +98,10 @@ app.put('/api/org/:orgId/members/:memberId/role', authenticateToken, async (req,
       data: { role },
       include: { user: { select: { name: true } } },
     });
+
+    if (target.userId !== req.user.id) {
+      await createNotification(target.userId, 'ROLE_CHANGED', 'ভূমিকা পরিবর্তন', `আপনার ভূমিকা ${target.role} থেকে ${role} এ পরিবর্তন করা হয়েছে।`, null, req.params.orgId);
+    }
 
     res.json({ message: `Role updated to ${role}`, member: updated });
   } catch (error) {
@@ -167,10 +177,12 @@ app.post('/api/org/:orgId/members/:memberId/action', authenticateToken, async (r
         where: { id: targetMembership.id },
         data: { status: 'active' }
       });
+      await createNotification(targetMembership.userId, 'MEMBERSHIP_APPROVED', 'সদস্যপদ অনুমোদিত', `আপনার ${targetMembership.organization.name} সংগঠনে যোগদানের অনুরোধ অনুমোদিত হয়েছে।`, null, req.params.orgId);
       broadcast({ type: "data_changed" });
       return res.json({ message: 'Membership approved', member: targetMembership });
     } else {
       await prisma.organizationMember.delete({ where: { id: targetMembership.id } });
+      await createNotification(targetMembership.userId, 'MEMBERSHIP_REJECTED', 'সদস্যপদ প্রত্যাখ্যান', `আপনার ${targetMembership.organization.name} সংগঠনে যোগদানের অনুরোধ প্রত্যাখ্যান করা হয়েছে।`, null, req.params.orgId);
       broadcast({ type: "data_changed" });
       return res.json({ message: 'Membership rejected and removed' });
     }

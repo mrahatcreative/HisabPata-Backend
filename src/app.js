@@ -98,6 +98,8 @@ require('./routes/aiTools')(app);
 require('./routes/books')(app, { authenticateToken, recalculateBookBalance });
 require('./routes/categories')(app, { authenticateToken });
 require('./routes/notifications')(app, { authenticateToken });
+require('./routes/notificationPreferences')(app, { authenticateToken });
+require('./routes/fcm')(app, { authenticateToken });
 require('./routes/personalBook')(app, { authenticateToken, hasBookAccess, enrichTxn });
 require('./routes/upload')(app, { authenticateToken, upload, uploadToS3, useS3 });
 require('./routes/audioNotes')(app, { authenticateToken, upload, transcribeWithBanglaSpeechApi, uploadToS3, useS3, getAsrConfig });

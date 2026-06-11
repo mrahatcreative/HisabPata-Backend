@@ -134,6 +134,10 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
 
     if (!mustApprove) {
       await executeHardDelete();
+      const recipientId = txn.recipientUserId;
+      if (recipientId && recipientId !== req.user.id) {
+        await createNotification(recipientId, 'DELETE_COMPLETED', 'লেনদেন মুছে ফেলা হয়েছে', `${user?.name || 'কেউ'} একটি লেনদেন মুছে ফেলেছেন।`, txnId, book.organizationId);
+      }
       return res.json({ message: 'Transaction deleted', pending: false });
     }
 
