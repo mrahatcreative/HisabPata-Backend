@@ -5,7 +5,8 @@ const { enrichTxn } = require('../../../helpers/enrichTxn');
 module.exports = async (ctx) => {
   const { book, parsedAmount, txnClientRef, txnDateTime, computedFundType, deps, req, res } = ctx;
   const { checkApprovalBypass, hasAdminOrEditorAccess, checkPermission, createNotification, getOrgAdminUserIds, maybeMirrorOrgTxnToCreatorPersonal, getChainRemainingBalance } = deps;
-  const { note, contact, fromLocation, toLocation, imageUrl, recipientUserId, orgFundId, bookId } = req.body;
+  const { note, contact, fromLocation, toLocation, imageUrl, recipientUserId, bookId } = req.body;
+  const orgFundId = req.body.orgFundId || req.body.fundBookId;
 
   const recipientMembership = await prisma.organizationMember.findFirst({
     where: { userId: recipientUserId, organization: { isPersonal: true } },

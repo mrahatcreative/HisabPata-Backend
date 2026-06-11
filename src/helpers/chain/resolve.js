@@ -96,17 +96,17 @@ const buildP1OrgApprovers = (chain, requesterId) => {
   const requesterIsOrg = chain.org.adminIds.includes(requesterId);
   if (requesterIsP1) {
     const rep = pickOrgRepresentative(chain.org.adminIds, requesterId);
-    return { requiredApprovers: rep ? [rep] : chain.org.adminIds, orgApprovalAnyOf: chain.org.adminIds, chainNote: 'degraded_p1_org' };
+    return { requiredApprovers: rep ? [rep] : chain.org.adminIds.filter(id => id !== requesterId), orgApprovalAnyOf: chain.org.adminIds.filter(id => id !== requesterId), chainNote: 'degraded_p1_org' };
   }
   if (requesterIsOrg) {
     return {
-      requiredApprovers: chain.p1.userId ? [chain.p1.userId] : [],
+      requiredApprovers: chain.p1.userId && chain.p1.userId !== requesterId ? [chain.p1.userId] : [],
       orgApprovalAnyOf: [],
       chainNote: 'degraded_p1_org',
     };
   }
   const rep = pickOrgRepresentative(chain.org.adminIds, requesterId);
-  return { requiredApprovers: rep ? [rep] : chain.org.adminIds, orgApprovalAnyOf: chain.org.adminIds, chainNote: 'degraded_p1_org' };
+  return { requiredApprovers: rep ? [rep] : chain.org.adminIds.filter(id => id !== requesterId), orgApprovalAnyOf: chain.org.adminIds.filter(id => id !== requesterId), chainNote: 'degraded_p1_org' };
 };
 
 const computeRequiredApprovers = (chain, requesterId) => {
@@ -194,7 +194,6 @@ const computeRequiredApprovers = (chain, requesterId) => {
       }
       const rep = pickOrgRepresentative(chain.org.adminIds, requesterId);
       let reqs = [chain.p2.userId, rep].filter((id) => id && id !== requesterId);
-      if (reqs.length === 0) reqs = [requesterId];
       return {
         requiredApprovers: reqs,
         orgApprovalAnyOf: chain.org.adminIds,
@@ -225,7 +224,6 @@ const computeRequiredApprovers = (chain, requesterId) => {
     }
 
     let reqs = finalizeLinkedChangeDeleteApprovers(required, requesterId, chain);
-    if (reqs.length === 0) reqs = [requesterId];
     return {
       requiredApprovers: reqs,
       orgApprovalAnyOf: chain.org.adminIds,

@@ -5,7 +5,8 @@ const { enrichTxn } = require('../../../helpers/enrichTxn');
 module.exports = async (ctx) => {
   const { book, parsedAmount, txnClientRef, txnDateTime, computedFundType, deps, req, res } = ctx;
   const { checkApprovalBypass, hasAdminOrEditorAccess, checkPermission, createNotification, getOrgAdminUserIds, maybeMirrorOrgTxnToCreatorPersonal } = deps;
-  const { note, contact, fromLocation, toLocation, imageUrl, orgFundId } = req.body;
+  const { note, contact, fromLocation, toLocation, imageUrl } = req.body;
+  const orgFundId = req.body.orgFundId || req.body.fundBookId;
 
   let isVoucherTxn = false;
   let isVoucherBook = false;
