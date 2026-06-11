@@ -77,7 +77,7 @@ module.exports = async (ctx) => {
         bookId: fundBook.id,
         amount: parsedAmount,
         type: 'expense',
-        note: note ? `${note} (fund send)` : 'Fund send',
+        note: note || '',
         category: 'Send',
         contact,
         recipientUserId: recipientUserId || null,
@@ -103,9 +103,7 @@ module.exports = async (ctx) => {
         bookId: recipientBook.id,
         amount: parsedAmount,
         type: 'income',
-        note: recipientUserId
-          ? `Org fund send: ${note || ''}`
-          : `Org fund transfer: ${note || ''}`,
+        note: note || '',
         category: 'Send',
         contact,
         recipientUserId: recipientUserId ? req.user.id : null,

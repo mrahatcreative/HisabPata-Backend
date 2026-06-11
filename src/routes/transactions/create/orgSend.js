@@ -45,7 +45,7 @@ module.exports = async (ctx) => {
         bookId: recipientBook.id,
         amount: parsedAmount,
         type: 'income',
-        note: 'Org fund transfer: ' + (note || ''),
+        note: note || '',
         category: 'Send',
         contact,
         recipientOrgId: book.organizationId,
