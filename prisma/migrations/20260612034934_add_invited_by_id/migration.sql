@@ -1,0 +1,1 @@
+-- AlterTable\nALTER TABLE "OrganizationMember" ADD COLUMN "invitedById" TEXT;\n\n-- AddForeignKey\nALTER TABLE "OrganizationMember" ADD CONSTRAINT "OrganizationMember_invitedById_fkey" FOREIGN KEY ("invitedById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
