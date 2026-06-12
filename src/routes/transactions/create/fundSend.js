@@ -18,6 +18,10 @@ module.exports = async (ctx) => {
     return res.status(400).json({ error: 'Invalid fund book' });
   }
 
+  if (recipientOrgId && fundBook.organizationId === recipientOrgId) {
+    return res.status(400).json({ error: 'Cannot send money from an organization fund to the same organization.' });
+  }
+
   let recipientBook = null;
   if (recipientUserId) {
     const recipientMembership = await prisma.organizationMember.findFirst({

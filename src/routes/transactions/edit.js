@@ -199,7 +199,12 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
           else if (txn.type === 'income') balanceAdjustment = parsedAmount - txn.amount;
         }
       } else {
-        if (
+        if (isRejected) {
+          // If a non-Send transaction was rejected, its balance was FULLY reversed.
+          // Retrying it means we must apply the new amount in full.
+          if (txn.type === 'expense') balanceAdjustment = -parsedAmount;
+          else if (txn.type === 'income') balanceAdjustment = parsedAmount;
+        } else if (
           changes.amount !== undefined &&
           changes.amount !== txn.amount
         ) {

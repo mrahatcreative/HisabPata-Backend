@@ -151,6 +151,12 @@ const rejectCreatorPersonalMirror = async (tx, orgTxn, rejectHistoryEntry) => {
       updateHistory: [...(cur.updateHistory || []), rejectHistoryEntry]
     }
   });
+
+  const balanceAdj = mirror.type === 'expense' ? mirror.amount : -mirror.amount;
+  await tx.book.update({
+    where: { id: mirror.bookId },
+    data: { balance: { increment: balanceAdj } }
+  });
 };
 
 const resolveOrgSourceTxnForMirror = async (txn, txClient = prisma) => {
