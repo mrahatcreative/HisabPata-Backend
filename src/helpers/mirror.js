@@ -23,10 +23,14 @@ const findFundVoucherPairedTxn = async (txn, book, txClient = prisma) => {
   if (cpm) return cpm;
 
   if (resolvedBook.organization?.isPersonal && txn.orgFundId) {
+    const originalRef = txn.clientRef.endsWith(CREATOR_PERSONAL_MIRROR_SUFFIX)
+      ? txn.clientRef.slice(0, -CREATOR_PERSONAL_MIRROR_SUFFIX.length)
+      : txn.clientRef;
+
     return txClient.transaction.findFirst({
       where: {
         bookId: txn.orgFundId,
-        clientRef: txn.clientRef,
+        clientRef: originalRef,
         createdById: txn.createdById
       }
     });
