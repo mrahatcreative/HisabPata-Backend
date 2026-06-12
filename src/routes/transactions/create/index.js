@@ -72,12 +72,12 @@ module.exports = function(app, deps) {
 
       const ctx = { book, parsedAmount, txnClientRef, txnDateTime, computedFundType, deps, req, res };
 
-      if (isOrgSend) {
-        return await orgSend(ctx);
-      }
-
       if (isSend && book.organization.isPersonal && orgFundId && (recipientUserId || recipientOrgId)) {
         return await fundSend(ctx);
+      }
+
+      if (isOrgSend) {
+        return await orgSend(ctx);
       }
 
       if (isSend && recipientUserId) {

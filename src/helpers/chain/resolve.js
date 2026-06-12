@@ -285,6 +285,8 @@ const resolveChangeDeleteChain = async (txn, book) => {
     if (txn.clientRef?.endsWith(CREATOR_PERSONAL_MIRROR_SUFFIX)) {
       const baseRef = txn.clientRef.slice(0, -CREATOR_PERSONAL_MIRROR_SUFFIX.length);
       orgEntry = await prisma.transaction.findFirst({ where: { clientRef: baseRef } });
+    } else if (txn.linkedTransactionId) {
+      orgEntry = await prisma.transaction.findUnique({ where: { id: txn.linkedTransactionId } });
     } else {
       orgEntry = await prisma.transaction.findFirst({
         where: {
@@ -292,6 +294,8 @@ const resolveChangeDeleteChain = async (txn, book) => {
           clientRef: txn.clientRef || undefined,
           amount: txn.amount,
           createdById: txn.createdById,
+          id: { not: txn.id },
+          book: { organization: { isPersonal: false } }
         },
       });
     }

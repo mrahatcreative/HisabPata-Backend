@@ -1,4 +1,5 @@
 const { prisma } = require('../../config/database');
+const { CREATOR_PERSONAL_MIRROR_SUFFIX } = require('../../config/constants');
 
 module.exports = function(app, { authenticateToken, hasAdminOrEditorAccess, checkPermission, createNotification, getOrgAdminUserIds, resolveApprovalOrgId, parsePendingData, buildChangeDeleteNotification }) {
 
@@ -37,7 +38,10 @@ app.get('/api/approvals/pending', authenticateToken, async (req, res) => {
               bookId: { notIn: adminBookIds },
               orgFundId: { in: adminBookIds }
             }
-          ]
+          ],
+          NOT: {
+            clientRef: { endsWith: CREATOR_PERSONAL_MIRROR_SUFFIX }
+          }
         },
         orderBy: { createdAt: 'desc' }
       });

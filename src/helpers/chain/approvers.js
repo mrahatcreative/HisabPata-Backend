@@ -71,6 +71,42 @@ const getRequiredApproversForChangeDelete = async (txn, book, requesterId) => {
     }
   }
 
+  // Fallback: personal book mirrors linked to org fund require org admin approval
+  if (book.organizationId && txn.orgFundId) {
+    const bookOrg = await prisma.organization.findUnique({
+      where: { id: book.organizationId },
+      select: { isPersonal: true }
+    });
+    if (bookOrg?.isPersonal) {
+      const fundBook = await prisma.book.findUnique({
+        where: { id: txn.orgFundId },
+        select: { organizationId: true }
+      });
+      if (fundBook?.organizationId) {
+        const [fundOrg, fundMembers] = await Promise.all([
+          prisma.organization.findUnique({
+            where: { id: fundBook.organizationId },
+            select: { isPersonal: true }
+          }),
+          prisma.organizationMember.findMany({
+            where: {
+              organizationId: fundBook.organizationId,
+              status: 'active',
+              OR: [{ role: 'admin' }, { permissions: { has: 'edit_all' } }]
+            },
+            select: { userId: true }
+          })
+        ]);
+        if (fundOrg && !fundOrg.isPersonal) {
+          const adminIds = fundMembers.map(m => m.userId);
+          const filtered = adminIds.filter(id => id !== requesterId);
+          if (filtered.length > 0) return filtered;
+          if (adminIds.length > 0) return [requesterId];
+        }
+      }
+    }
+  }
+
   return [];
 };
 
