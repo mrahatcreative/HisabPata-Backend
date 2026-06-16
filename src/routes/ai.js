@@ -101,7 +101,25 @@ module.exports = (app) => {
       if (context) {
         const cats = context.categories?.length ? context.categories.join(', ') : 'Transport, Mobile Recharge, Postage, Publication, Office Stationery, Tips, Donation, Others, Salary';
         const bal = context.balance ?? 0;
-        contextBlock = `\nbook_type: personal\ncategories: ${cats}\nbalance: ${bal}`;
+        const bookName = context.book_name || 'Personal';
+        contextBlock = `\nবর্তমান বই: "${bookName}"\nব্যালেন্স: ${bal} টাকা\nক্যাটাগরি: ${cats}`;
+        if (context.recent_transactions?.length > 0) {
+          contextBlock += `\nসাম্প্রতিক লেনদেন:\n`;
+          context.recent_transactions.forEach((t, i) => {
+            const tType = t.type === 'expense' ? 'খরচ' : 'আয়';
+            const tCat = t.category || '';
+            const tNote = t.note ? ` (${t.note})` : '';
+            const tAmt = t.amount ?? 0;
+            const tDate = t.dateTime ? new Date(t.dateTime).toLocaleDateString('bn') : '';
+            contextBlock += `${i + 1}. ${tType} ${tAmt}টাকা ${tCat}${tNote} ${tDate}\n`;
+          });
+        }
+        if (context.all_books?.length > 1) {
+          contextBlock += `\nসব বই:\n`;
+          context.all_books.forEach(b => {
+            contextBlock += `- "${b.name}": ${b.balance} টাকা\n`;
+          });
+        }
       }
 
       const history = (clientMessages || []).slice(0, -1).filter(m => m.role === 'user' || m.role === 'assistant');
