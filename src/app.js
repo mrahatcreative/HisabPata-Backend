@@ -106,6 +106,25 @@ require('./routes/admin')(app, { authenticateToken, authenticateAdmin, upload })
 require('./routes/retry')(app, { authenticateToken, resolveApprovalOrgId, checkApprovalBypass, resolveFundSendChainParts, fundSendRetryStatuses, hasAdminOrEditorAccess });
 require('./routes/approvals')(app, { authenticateToken, hasAdminOrEditorAccess, checkPermission, createNotification, getOrgAdminUserIds, resolveApprovalOrgId, parsePendingData });
 require('./routes/transactions')(app, { authenticateToken, hasBookAccess, checkPermission, hasAdminOrEditorAccess, checkApprovalBypass, createNotification, getOrgAdminUserIds, maybeMirrorOrgTxnToCreatorPersonal, getChainRemainingBalance, mustUseChangeDeleteApprovalFlow, getRequiredApproversForChangeDelete, buildChangeDeletePendingData, syncCounterpartLegsForChangeDelete, notifyChangeDeleteApprovers, buildChangeDeleteNotification, deleteCounterpartLegsForChangeDelete, reverseTxnBalanceForRemoval, generateChainId, fundSendRetryStatuses, resolveApprovalOrgId, resolveFundSendChainParts, parsePendingData, parseClientDateTime, enrichTxn, DEFAULT_CATEGORIES });
-require('./routes/ai')(app);
+// Load AI routes
+try {
+  console.log('[app.js] Attempting to load AI routes...');
+  require('./routes/ai')(app);
+  console.log('[app.js] AI routes loaded successfully');
+} catch (e) {
+  console.error('[app.js] FAILED to load AI routes:', e.message);
+}
+
+// Inline backup AI health route (always works)
+app.get('/api/ai/health', async (_req, res) => {
+  try {
+    const AI_SERVER_URL = (process.env.AI_SERVER_URL || 'http://localhost:8080').replace(/\/+$/, '');
+    const response = await fetch(`${AI_SERVER_URL}/health`, { signal: AbortSignal.timeout(5000) });
+    const data = await response.json();
+    res.json(data);
+  } catch {
+    res.status(502).json({ status: 'error', model_online: false });
+  }
+});
 
 module.exports = app;
