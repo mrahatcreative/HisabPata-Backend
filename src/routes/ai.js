@@ -42,28 +42,45 @@ function ruleHandle(message, context) {
   return null;
 }
 
+function jsonToContent(parsed) {
+  const { response: text, slots, action, intent } = parsed;
+  let extra = '';
+  if (action === 'ask_confirm' && slots && Object.keys(slots).length > 0) {
+    const expense = { type: 'expense', ...slots };
+    extra = `\n\n[DATA type:expense]${JSON.stringify(expense)}[/DATA]`;
+  }
+  if (intent === 'check_balance' && slots?.balance != null) {
+    const bal = slots.balance;
+    const books = typeof bal === 'number' ? [{ book: 'Personal', balance: bal }] : bal;
+    extra = `\n\n[DATA type:balance]${JSON.stringify({ books })}[/DATA]`;
+  }
+  return (text || '') + extra;
+}
+
+let pendingExpense = null;
+
 console.log('[AI Routes] Loading /api/ai/* routes...');
 module.exports = (app) => {
   const router = express.Router();
 
-  // POST /api/ai/chat — rule-first, then model
   router.post('/chat', async (req, res) => {
     try {
       const { message, context } = req.body;
 
-      // Step 1: Try rule
       const ruled = ruleHandle(message, context);
       if (ruled) {
+        if (ruled.intent === 'add_expense' && ruled.action === 'ask_confirm') {
+          pendingExpense = { ...ruled.slots, type: 'expense' };
+        }
         return res.json({
           id: `chatcmpl-${Math.random().toString(36).slice(2, 14)}`,
           object: 'chat.completion',
           created: Math.floor(Date.now() / 1000),
-          choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(ruled) }, finish_reason: 'stop' }],
+          choices: [{ index: 0, message: { role: 'assistant', content: jsonToContent(ruled) }, finish_reason: 'stop' }],
           usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
         });
       }
 
-      // Step 2: Build OpenAI messages with system prompt
       let contextBlock = '';
       if (context) {
         const cats = context.categories?.length ? context.categories.join(', ') : 'Transport, Mobile Recharge, Postage, Publication, Office Stationery, Tips, Donation, Others, Salary';
@@ -87,6 +104,18 @@ module.exports = (app) => {
       }
 
       const data = await response.json();
+      const rawContent = data?.choices?.[0]?.message?.content;
+      if (rawContent) {
+        try {
+          const parsed = JSON.parse(rawContent);
+          if (parsed.intent === 'add_expense' && parsed.action === 'ask_confirm') {
+            pendingExpense = { ...parsed.slots, type: 'expense' };
+          }
+          data.choices[0].message.content = jsonToContent(parsed);
+        } catch {
+          // not valid JSON, leave as-is
+        }
+      }
       res.json(data);
     } catch (err) {
       console.error('[AI Proxy]', err.message);
@@ -94,29 +123,19 @@ module.exports = (app) => {
     }
   });
 
-  // POST /api/ai/expense/confirm
   router.post('/expense/confirm', async (_req, res) => {
-    try {
-      const response = await fetch(`${AI_SERVER_URL}/v1/expense/confirm`, { method: 'POST' });
-      const data = await response.json();
-      res.json(data);
-    } catch (err) {
-      res.status(502).json({ status: 'error', message: err.message });
+    if (!pendingExpense) {
+      return res.status(400).json({ status: 'error', message: 'No pending expense' });
     }
+    res.json({ status: 'ok', expense: pendingExpense });
+    pendingExpense = null;
   });
 
-  // POST /api/ai/expense/cancel
   router.post('/expense/cancel', async (_req, res) => {
-    try {
-      const response = await fetch(`${AI_SERVER_URL}/v1/expense/cancel`, { method: 'POST' });
-      const data = await response.json();
-      res.json(data);
-    } catch (err) {
-      res.status(502).json({ status: 'error', message: err.message });
-    }
+    pendingExpense = null;
+    res.json({ status: 'ok', message: 'Cancelled' });
   });
 
-  // GET /api/ai/health — AI server health check
   router.get('/health', async (_req, res) => {
     try {
       const response = await fetch(`${AI_SERVER_URL}/health`, { signal: AbortSignal.timeout(5000) });
