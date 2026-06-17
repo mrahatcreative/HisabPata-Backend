@@ -409,9 +409,19 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
         oldRecipientUserId: txn.recipientUserId,
         oldLinkedTransactionId: txn.linkedTransactionId,
         oldOrgFundId: txn.orgFundId,
+        oldTransactionTime: txn.dateTime,
+        oldContact: txn.contact,
+        oldImageUrl: txn.imageUrl,
+        oldFromLocation: txn.fromLocation,
+        oldToLocation: txn.toLocation,
         newAmount: changes.amount !== undefined ? parsedAmount : txn.amount,
         newNote: changes.note !== undefined ? changes.note : txn.note,
         newCategory: changes.category !== undefined ? changes.category : txn.category,
+        newTransactionTime: changes.dateTime !== undefined ? changes.dateTime : txn.dateTime,
+        newContact: changes.contact !== undefined ? changes.contact : txn.contact,
+        newImageUrl: changes.imageUrl !== undefined ? changes.imageUrl : txn.imageUrl,
+        newFromLocation: changes.fromLocation !== undefined ? changes.fromLocation : txn.fromLocation,
+        newToLocation: changes.toLocation !== undefined ? changes.toLocation : txn.toLocation,
       });
       console.log(`[DEBUG] 5. After buildChangeDeletePendingData()`);
 
@@ -460,6 +470,11 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
         if (changes.amount !== undefined) linkedChanges.amount = parsedAmount;
         if (changes.note !== undefined) linkedChanges.note = changes.note;
         if (changes.category !== undefined) linkedChanges.category = changes.category;
+        if (changes.contact !== undefined) linkedChanges.contact = changes.contact;
+        if (changes.imageUrl !== undefined) linkedChanges.imageUrl = changes.imageUrl;
+        if (changes.dateTime !== undefined) linkedChanges.dateTime = changes.dateTime;
+        if (changes.fromLocation !== undefined) linkedChanges.fromLocation = changes.fromLocation;
+        if (changes.toLocation !== undefined) linkedChanges.toLocation = changes.toLocation;
 
         console.log(`[DEBUG] 8. Before syncCounterpartLegsForChangeDelete()`);
         await syncCounterpartLegsForChangeDelete(prisma, txn, book, {
