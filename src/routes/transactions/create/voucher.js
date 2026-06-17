@@ -21,7 +21,7 @@ module.exports = async (ctx) => {
     if (targetBook) {
       isVoucherBook = true;
     } else {
-      return res.status(404).json({ error: 'Original disbursement or target book not found' });
+      return res.status(404).json({ error: { bn: 'মূল ডিসবার্সমেন্ট বা টার্গেট বই পাওয়া যায়নি।', en: 'Original disbursement or target book not found' } });
     }
   }
 
@@ -29,7 +29,7 @@ module.exports = async (ctx) => {
     ? await prisma.book.findUnique({ where: { id: origDisbursement.bookId } })
     : targetBook;
   if (!voucherOrgBook) {
-    return res.status(400).json({ error: 'Target organization book not found' });
+    return res.status(400).json({ error: { bn: 'টার্গেট অর্গানাইজেশন বই পাওয়া যায়নি।', en: 'Target organization book not found' } });
   }
 
   if (voucherOrgBook.organizationId) {
@@ -37,7 +37,7 @@ module.exports = async (ctx) => {
       where: { userId: req.user.id, organizationId: voucherOrgBook.organizationId, status: 'active' }
     });
     if (!voucherOrgMember) {
-      return res.status(403).json({ error: 'Not a member of the target organization' });
+      return res.status(403).json({ error: { bn: 'টার্গেট অর্গানাইজেশনের সদস্য নন।', en: 'Not a member of the target organization' } });
     }
   }
 

@@ -15,11 +15,11 @@ module.exports = async (ctx) => {
   const isFundOrgBook = fundBook && !fundBook.organization.isPersonal && fundBook.id !== bookId;
 
   if (!isFundOrgBook) {
-    return res.status(400).json({ error: 'Invalid fund book' });
+    return res.status(400).json({ error: { bn: 'অবৈধ তহবিল বই।', en: 'Invalid fund book' } });
   }
 
   if (recipientOrgId && fundBook.organizationId === recipientOrgId) {
-    return res.status(400).json({ error: 'Cannot send money from an organization fund to the same organization.' });
+    return res.status(400).json({ error: { bn: 'একই সংগঠনে একটি অর্গ ফান্ড থেকে টাকা পাঠানো যাবে না।', en: 'Cannot send money from an organization fund to the same organization.' } });
   }
 
   let recipientBook = null;
@@ -29,7 +29,7 @@ module.exports = async (ctx) => {
       include: { organization: { include: { books: { where: { isDefault: true } } } } }
     });
     if (!recipientMembership || recipientMembership.organization.books.length === 0) {
-      return res.status(400).json({ error: 'Recipient has no personal book' });
+      return res.status(400).json({ error: { bn: 'প্রাপকের কোনো ব্যক্তিগত বই নেই।', en: 'Recipient has no personal book' } });
     }
     recipientBook = recipientMembership.organization.books[0];
   } else {
@@ -37,7 +37,7 @@ module.exports = async (ctx) => {
       where: { organizationId: recipientOrgId, isDefault: true }
     });
     if (!recipientBook) {
-      return res.status(400).json({ error: 'Recipient organization has no default book' });
+      return res.status(400).json({ error: { bn: 'প্রাপক সংগঠনের কোনো ডিফল্ট বই নেই।', en: 'Recipient organization has no default book' } });
     }
   }
 

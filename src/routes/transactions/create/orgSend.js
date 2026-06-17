@@ -11,7 +11,7 @@ module.exports = async (ctx) => {
     where: { organizationId: recipientOrgId, isDefault: true }
   });
   if (!recipientBook) {
-    return res.status(400).json({ error: 'Recipient organization has no default book' });
+    return res.status(400).json({ error: { bn: 'প্রাপক সংগঠনের কোনো ডিফল্ট বই নেই।', en: 'Recipient organization has no default book' } });
   }
 
   const bypassSourceOrgApproval = await checkApprovalBypass(book.organizationId, req.user.id);

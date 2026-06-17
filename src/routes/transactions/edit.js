@@ -12,14 +12,14 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
     const txnId = req.params.id;
 
     const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
-    if (!txn) return res.status(404).json({ error: 'Transaction not found' });
+    if (!txn) return res.status(404).json({ error: { bn: 'লেনদেন পাওয়া যায়নি।', en: 'Transaction not found' } });
 
     if (txn.reconStatus === 'FROZEN') {
-      return res.status(422).json({ error: 'Frozen transaction cannot be edited. Rejoin the organization to modify this entry.' });
+      return res.status(422).json({ error: { bn: 'ফ্রোজেন লেনদেন সম্পাদনা করা যাবে না। পুনরায় সংগঠনে যোগ দিন।', en: 'Frozen transaction cannot be edited. Rejoin the organization to modify this entry.' } });
     }
 
     const book = await prisma.book.findUnique({ where: { id: txn.bookId }, include: { organization: { select: { isPersonal: true } } } });
-    if (!book) return res.status(404).json({ error: 'Book not found' });
+    if (!book) return res.status(404).json({ error: { bn: 'বই পাওয়া যায়নি।', en: 'Book not found' } });
 
     // ── Authorization: Who can edit? ──
     // Sender (createdById) can always edit their own Send transactions.
@@ -49,32 +49,32 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
       if (isPending) {
         // Receiver cannot edit pending transactions
         if (isReceiver) {
-          return res.status(403).json({ error: 'Receiver cannot edit a pending transaction' });
+          return res.status(403).json({ error: { bn: 'প্রাপক অপেক্ষমাণ লেনদেন সম্পাদনা করতে পারবেন না।', en: 'Receiver cannot edit a pending transaction' } });
         }
         // Only sender or admin/editor can edit
         if (!isSender && !isAdminOrEditor) {
-          return res.status(403).json({ error: 'Only the sender, admins, or editors can edit this transaction' });
+          return res.status(403).json({ error: { bn: 'শুধু প্রেরক, অ্যাডমিন বা এডিটর এই লেনদেন সম্পাদনা করতে পারেন।', en: 'Only the sender, admins, or editors can edit this transaction' } });
         }
       } else if (isRejected) {
         // Only sender or admin/editor can edit rejected
         if (!isSender && !isAdminOrEditor) {
-          return res.status(403).json({ error: 'Only the sender, admins, or editors can edit a rejected transaction' });
+          return res.status(403).json({ error: { bn: 'শুধু প্রেরক, অ্যাডমিন বা এডিটর প্রত্যাখ্যাত লেনদেন সম্পাদনা করতে পারেন।', en: 'Only the sender, admins, or editors can edit a rejected transaction' } });
         }
       } else if (isApproved) {
         // Both parties can initiate edit on approved transactions
         if (!isSender && !isReceiver && !isAdminOrEditor) {
-          return res.status(403).json({ error: 'Not authorized to edit this transaction' });
+          return res.status(403).json({ error: { bn: 'এই লেনদেন সম্পাদনার অনুমতি নেই।', en: 'Not authorized to edit this transaction' } });
         }
       } else {
         // Fallback: admin/editor only
         if (!isAdminOrEditor) {
-          return res.status(403).json({ error: 'Only admins or editors can edit transactions' });
+          return res.status(403).json({ error: { bn: 'শুধু অ্যাডমিন বা এডিটর লেনদেন সম্পাদনা করতে পারেন।', en: 'Only admins or editors can edit transactions' } });
         }
       }
     } else {
       // Non-Send transactions: existing rule
       if (!isAdminOrEditor) {
-        return res.status(403).json({ error: 'Only admins or editors can edit transactions' });
+        return res.status(403).json({ error: { bn: 'শুধু অ্যাডমিন বা এডিটর লেনদেন সম্পাদনা করতে পারেন।', en: 'Only admins or editors can edit transactions' } });
       }
     }
 
@@ -90,7 +90,7 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
               where: { userId_organizationId: { userId: req.user.id, organizationId: linkedBook.organizationId } }
             });
             if (!membership || membership.status !== 'active') {
-              return res.status(403).json({ error: 'সংগঠন থেকে leave করার পর এই entry edit করা যাবে না। আবার জয়েন করুন।' });
+              return res.status(403).json({ error: { bn: 'সংগঠন থেকে leave করার পর এই entry edit করা যাবে না। আবার জয়েন করুন।', en: 'Cannot edit this entry after leaving the organization. Rejoin to modify.' } });
             }
           }
         }
@@ -111,19 +111,19 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
       !isExistingOrgFundMirror
     ) {
       return res.status(400).json({
-        error: 'Organization books only support Send for expenses. Use your personal book with this organization as fund for other categories.'
+        error: { bn: 'সংগঠনের বই শুধু Send ব্যয়ের জন্য। অন্য ক্যাটাগরির জন্য আপনার ব্যক্তিগত বই ব্যবহার করুন এই সংগঠনকে ফান্ড হিসেবে।', en: 'Organization books only support Send for expenses. Use your personal book with this organization as fund for other categories.' }
       });
     }
     if (isExistingOrgFundMirror && category !== undefined && category === 'Send') {
       return res.status(400).json({
-        error: 'Fund voucher entries cannot be changed to Send. Edit amount or note only.'
+        error: { bn: 'ফান্ড ভাউচার এন্ট্রি Send-এ পরিবর্তন করা যাবে না। শুধু পরিমাণ বা নোট সম্পাদনা করুন।', en: 'Fund voucher entries cannot be changed to Send. Edit amount or note only.' }
       });
     }
 
     const changes = {};
     if (amount !== undefined) {
       const parsed = parseFloat(amount);
-      if (!Number.isFinite(parsed) || parsed <= 0) return res.status(400).json({ error: 'Amount must be a valid positive number' });
+      if (!Number.isFinite(parsed) || parsed <= 0) return res.status(400).json({ error: { bn: 'পরিমাণ একটি সঠিক ধনাত্মক সংখ্যা হতে হবে।', en: 'Amount must be a valid positive number' } });
       changes.amount = parsed;
     }
     if (type !== undefined) changes.type = type;
@@ -141,7 +141,7 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
         changes.fundType = 'PERSONAL';
       } else {
         const fundBook = await prisma.book.findUnique({ where: { id: orgFundId } });
-        if (!fundBook) return res.status(400).json({ error: 'Invalid fund source' });
+        if (!fundBook) return res.status(400).json({ error: { bn: 'অবৈধ তহবিল উৎস।', en: 'Invalid fund source' } });
         changes.orgFundId = orgFundId;
         changes.fundType = 'ORG';
       }
@@ -150,17 +150,17 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
       changes.dateTime = parseClientDateTime(clientDateTime);
     }
 
-    if (Object.keys(changes).length === 0) return res.status(400).json({ error: 'No fields to update' });
+    if (Object.keys(changes).length === 0) return res.status(400).json({ error: { bn: 'কোনো ফিল্ড আপডেট করা হয়নি।', en: 'No fields to update' } });
 
     if (changes.amount !== undefined && (!changes.amount || changes.amount <= 0)) {
-      return res.status(400).json({ error: 'Amount must be a positive number' });
+      return res.status(400).json({ error: { bn: 'পরিমাণ একটি ধনাত্মক সংখ্যা হতে হবে।', en: 'Amount must be a positive number' } });
     }
 
     const parsedAmount = changes.amount !== undefined ? changes.amount : txn.amount;
     const parsedType = changes.type !== undefined ? changes.type : txn.type;
 
     if (txn.pendingAction) {
-      return res.status(400).json({ error: 'Transaction is already pending an approval for edit or delete.' });
+      return res.status(400).json({ error: { bn: 'লেনদেনটি ইতিমধ্যে সম্পাদনা বা মুছে ফেলার জন্য অনুমোদনের অপেক্ষায় আছে।', en: 'Transaction is already pending an approval for edit or delete.' } });
     }
 
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true } });
@@ -529,17 +529,17 @@ app.post('/api/transactions/:id/modify', authenticateToken, async (req, res) => 
     const txnId = req.params.id;
 
     if (!newAmount || parseFloat(newAmount) <= 0) {
-      return res.status(400).json({ error: 'New amount must be a positive number' });
+      return res.status(400).json({ error: { bn: 'নতুন পরিমাণ একটি ধনাত্মক সংখ্যা হতে হবে।', en: 'New amount must be a positive number' } });
     }
     const parsedNew = parseFloat(newAmount);
 
     const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
-    if (!txn) return res.status(404).json({ error: 'Transaction not found' });
-    if (!['pending', 'pending_org', 'pending_recipient'].includes(txn.reconStatus)) return res.status(400).json({ error: 'Only pending transactions can be modified' });
+    if (!txn) return res.status(404).json({ error: { bn: 'লেনদেন পাওয়া যায়নি।', en: 'Transaction not found' } });
+    if (!['pending', 'pending_org', 'pending_recipient'].includes(txn.reconStatus)) return res.status(400).json({ error: { bn: 'শুধু অপেক্ষমাণ লেনদেন পরিবর্তন করা যাবে।', en: 'Only pending transactions can be modified' } });
 
     // Determine if caller is the recipient or an admin/editor
     const txnBook = await prisma.book.findUnique({ where: { id: txn.bookId }, include: { organization: true } });
-    if (!txnBook) return res.status(404).json({ error: 'Book not found' });
+    if (!txnBook) return res.status(404).json({ error: { bn: 'বই পাওয়া যায়নি।', en: 'Book not found' } });
 
     // Recipient check: if txn is in user's personal book, they own it
     const memberCheck = await prisma.organizationMember.findFirst({
@@ -550,7 +550,7 @@ app.post('/api/transactions/:id/modify', authenticateToken, async (req, res) => 
     const isEditor = await hasAdminOrEditorAccess(txnBook.organizationId, req.user.id);
 
     if (!isRecipient && !isEditor) {
-      return res.status(403).json({ error: 'Only the recipient or an admin/editor can modify the amount' });
+      return res.status(403).json({ error: { bn: 'শুধু প্রাপক বা অ্যাডমিন/এডিটর পরিমাণ পরিবর্তন করতে পারেন।', en: 'Only the recipient or an admin/editor can modify the amount' } });
     }
 
     // Sender/Admin: directly update the amount on both linked txns

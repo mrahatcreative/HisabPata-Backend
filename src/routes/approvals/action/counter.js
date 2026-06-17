@@ -26,18 +26,18 @@ const handleRejectModification = async (ctx) => {
 const handleCounterApprove = async (ctx) => {
   const { txn, txnId, req, res, deps } = ctx;
   if (txn.counterProposedAmount == null) {
-    return res.status(400).json({ error: 'No modification to counter-approve' });
+    return res.status(400).json({ error: { bn: 'কাউন্টার-অনুমোদনের জন্য কোনো পরিবর্তন নেই।', en: 'No modification to counter-approve' } });
   }
   if (txn.counterProposedBy === req.user.id) {
-    return res.status(403).json({ error: 'You cannot approve your own counter-proposal' });
+    return res.status(403).json({ error: { bn: 'আপনি নিজের কাউন্টার-প্রস্তাব অনুমোদন করতে পারবেন না।', en: 'You cannot approve your own counter-proposal' } });
   }
   const finalAmount = txn.counterProposedAmount;
   const linkedId = txn.linkedTransactionId;
   if (!linkedId) {
-    return res.status(400).json({ error: 'No linked transaction found' });
+    return res.status(400).json({ error: { bn: 'কোনো লিঙ্কড লেনদেন পাওয়া যায়নি।', en: 'No linked transaction found' } });
   }
   const linkedTxn = await prisma.transaction.findUnique({ where: { id: linkedId } });
-  if (!linkedTxn) return res.status(404).json({ error: 'Linked transaction not found' });
+  if (!linkedTxn) return res.status(404).json({ error: { bn: 'লিঙ্কড লেনদেন পাওয়া যায়নি।', en: 'Linked transaction not found' } });
 
   const sourceTxn = txn.type === 'expense' ? txn : linkedTxn;
   const recipientTxn = txn.type === 'income' ? txn : linkedTxn;

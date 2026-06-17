@@ -17,11 +17,11 @@ module.exports = function(app, deps) {
       const { action } = req.body;
 
       if (!['approve', 'reject', 'cancel', 'counter_approve', 'reject_modification'].includes(action)) {
-        return res.status(400).json({ error: 'Action must be "approve", "reject", "cancel", "counter_approve", or "reject_modification"' });
+        return res.status(400).json({ error: { bn: 'অ্যাকশন অবশ্যই "approve", "reject", "cancel", "counter_approve", বা "reject_modification" হতে হবে।', en: 'Action must be "approve", "reject", "cancel", "counter_approve", or "reject_modification"' } });
       }
 
       const txn = await prisma.transaction.findUnique({ where: { id: req.params.id } });
-      if (!txn) return res.status(404).json({ error: 'Transaction not found' });
+      if (!txn) return res.status(404).json({ error: { bn: 'লেনদেন পাওয়া যায়নি।', en: 'Transaction not found' } });
 
       // Prevent double approval of already approved transaction
       if (action === 'approve' && txn.reconStatus === 'approved' && !txn.pendingAction && txn.counterProposedAmount == null) {
@@ -29,7 +29,7 @@ module.exports = function(app, deps) {
       }
 
       const txnBook = await prisma.book.findUnique({ where: { id: txn.bookId } });
-      if (!txnBook) return res.status(404).json({ error: 'Book not found' });
+      if (!txnBook) return res.status(404).json({ error: { bn: 'বই পাওয়া যায়নি।', en: 'Book not found' } });
 
       const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true } });
       const userName = user?.name || 'Unknown';
@@ -81,7 +81,7 @@ module.exports = function(app, deps) {
 
       const isSender = txn.createdById === req.user.id;
       if (!isRecipient && !(await hasAdminOrEditorAccess(txnBook.organizationId, req.user.id)) && !hasFundOrgAccess && !(action === 'counter_approve' && isSender)) {
-        return res.status(403).json({ error: 'Only admins, editors, or the recipient can approve/reject transactions' });
+        return res.status(403).json({ error: { bn: 'শুধু অ্যাডমিন, এডিটর, বা প্রাপক লেনদেন অনুমোদন/প্রত্যাখ্যান করতে পারেন।', en: 'Only admins, editors, or the recipient can approve/reject transactions' } });
       }
 
       if (txn.pendingAction && ['edit', 'delete'].includes(txn.pendingAction)) {
@@ -90,14 +90,14 @@ module.exports = function(app, deps) {
           const dualLeg = pendingDataObj.dualLegSameUser === true;
           if (!dualLeg || txn.id === pendingDataObj.requestedFromTxnId) {
             return res.status(403).json({
-              error: 'Approve or reject from the linked book entry (the other leg), not the row you requested from.'
+              error: { bn: 'লিঙ্ক করা বুক এন্ট্রি (অন্য লেগ) থেকে অনুমোদন বা প্রত্যাখ্যান করুন, যে সারি থেকে অনুরোধ করেছেন তা থেকে নয়।', en: 'Approve or reject from the linked book entry (the other leg), not the row you requested from.' }
             });
           }
         }
         
         if (action === 'cancel') {
           if (pendingDataObj.requestedBy !== req.user.id && !(await hasAdminOrEditorAccess(txnBook.organizationId, req.user.id))) {
-            return res.status(403).json({ error: 'Only the requester or an admin can cancel this request' });
+            return res.status(403).json({ error: { bn: 'শুধু অনুরোধকারী বা অ্যাডমিন এই অনুরোধ বাতিল করতে পারেন।', en: 'Only the requester or an admin can cancel this request' } });
           }
         } else {
           const required = pendingDataObj.requiredApprovers || [];
@@ -105,7 +105,7 @@ module.exports = function(app, deps) {
           if (required.length > 0 || orgAnyOf.length > 0) {
             const canApprove = required.includes(req.user.id) || orgAnyOf.includes(req.user.id);
             if (!canApprove) {
-              return res.status(403).json({ error: 'You are not authorized to approve this edit/delete request.' });
+              return res.status(403).json({ error: { bn: 'আপনি এই সম্পাদনা/মুছে ফেলার অনুরোধ অনুমোদনের জন্য অনুমোদিত নন।', en: 'You are not authorized to approve this edit/delete request.' } });
             }
           }
         }
@@ -125,7 +125,7 @@ module.exports = function(app, deps) {
         case 'reject_modification':
           return await handleRejectModification(ctx);
         default:
-          return res.status(400).json({ error: 'Invalid action' });
+          return res.status(400).json({ error: { bn: 'অবৈধ অ্যাকশন।', en: 'Invalid action' } });
       }
     } catch (error) {
       console.error('Transaction action error:', error);

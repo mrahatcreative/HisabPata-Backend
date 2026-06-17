@@ -16,7 +16,7 @@ module.exports = function(app, deps) {
       const orgFundId = _orgFundId || fundBookId || null;
 
       if (!bookId || !amount || !type) {
-        return res.status(400).json({ error: 'BookId, amount, and type are required' });
+        return res.status(400).json({ error: { bn: 'বুক আইডি, পরিমাণ এবং ধরণ আবশ্যক।', en: 'BookId, amount, and type are required' } });
       }
 
       if (audioNoteId) {
@@ -37,7 +37,7 @@ module.exports = function(app, deps) {
       const parsedAmount = parseFloat(amount);
 
       if (!parsedAmount || parsedAmount <= 0) {
-        return res.status(400).json({ error: 'Amount must be a positive number' });
+        return res.status(400).json({ error: { bn: 'পরিমাণ একটি ধনাত্মক সংখ্যা হতে হবে।', en: 'Amount must be a positive number' } });
       }
 
       const txnClientRef = clientRef || 'cr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
@@ -54,22 +54,22 @@ module.exports = function(app, deps) {
 
       const book = await prisma.book.findUnique({ where: { id: bookId }, include: { organization: { select: { isPersonal: true } } } });
       if (!book) {
-        return res.status(404).json({ error: 'Ledger book not found' });
+        return res.status(404).json({ error: { bn: 'লেজার বই পাওয়া যায়নি।', en: 'Ledger book not found' } });
       }
 
       if (!(await hasBookAccess(book, req.user.id))) {
-        return res.status(403).json({ error: 'Not authorized to use this book' });
+        return res.status(403).json({ error: { bn: 'এই বই ব্যবহারের অনুমতি নেই।', en: 'Not authorized to use this book' } });
       }
 
       if (!book.organization.isPersonal && !(await hasAdminOrEditorAccess(book.organizationId, req.user.id))) {
         return res.status(403).json({
-          error: 'Members must record org expenses from their personal book with an org fund selected'
+          error: { bn: 'সদস্যদের অবশ্যই তাদের ব্যক্তিগত বই থেকে অর্গ ব্যয় রেকর্ড করতে হবে একটি অর্গ ফান্ড নির্বাচন করে।', en: 'Members must record org expenses from their personal book with an org fund selected' }
         });
       }
 
       if (!book.organization.isPersonal && type === 'expense' && category !== 'Send') {
         return res.status(400).json({
-          error: 'Organization books only support Send for expenses. Use your personal book with this organization as fund for other categories.'
+          error: { bn: 'সংগঠনের বই শুধু Send ব্যয়ের জন্য। আপনার ব্যক্তিগত বই ব্যবহার করুন এই সংগঠনকে ফান্ড হিসেবে।', en: 'Organization books only support Send for expenses. Use your personal book with this organization as fund for other categories.' }
         });
       }
 

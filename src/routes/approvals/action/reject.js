@@ -159,7 +159,7 @@ const handleReject = async (ctx) => {
   }
 
   if (!['pending_org', 'pending_recipient', 'pending'].includes(txn.reconStatus)) {
-    return res.status(400).json({ error: 'Transaction is not in a rejectable state' });
+    return res.status(400).json({ error: { bn: 'লেনদেন প্রত্যাখ্যানযোগ্য অবস্থায় নেই।', en: 'Transaction is not in a rejectable state' } });
   }
 
   const isSend = txn.category === 'Send';
@@ -181,7 +181,7 @@ const handleReject = async (ctx) => {
   }
 
   if (!isReceiver && !(await hasAdminOrEditorAccess(book.organizationId, req.user.id))) {
-    return res.status(403).json({ error: 'Access denied' });
+    return res.status(403).json({ error: { bn: 'অ্যাক্সেস অস্বীকৃত।', en: 'Access denied' } });
   }
 
   let isLiabilityReject = false;

@@ -39,7 +39,7 @@ const handleApprove = async (ctx) => {
       }
       if (!isAuthorizedRecipient) {
         return res.status(403).json({
-          error: 'This send is waiting for the recipient to accept. Approve from the recipient\'s book.',
+          error: { bn: 'এই সেন্ড প্রাপকের গ্রহণের অপেক্ষায় আছে। প্রাপকের বই থেকে অনুমোদন করুন।', en: 'This send is waiting for the recipient to accept. Approve from the recipient\'s book.' },
         });
       }
     }
@@ -74,7 +74,7 @@ const handleApprove = async (ctx) => {
     }
 
     if (!isAuthorizedRecipient) {
-      return res.status(403).json({ error: 'Only the recipient of the transfer can accept/approve it.' });
+      return res.status(403).json({ error: { bn: 'শুধু ট্রান্সফারের প্রাপক এটি গ্রহণ/অনুমোদন করতে পারেন।', en: 'Only the recipient of the transfer can accept/approve it.' } });
     }
   }
 
@@ -291,7 +291,7 @@ const handleApprove = async (ctx) => {
   // --- PENDING_ORG → advance to next stage ---
   if (txn.reconStatus === 'pending_org') {
     if (txn.chainType === 'fund_send' && txn.type === 'income') {
-      return res.status(400).json({ error: 'Fund organization must approve the send first' });
+      return res.status(400).json({ error: { bn: 'ফান্ড অর্গানাইজেশনকে প্রথমে সেন্ড অনুমোদন করতে হবে।', en: 'Fund organization must approve the send first' } });
     }
 
     const isSend = txn.category === 'Send' && txn.linkedTransactionId;
@@ -530,7 +530,7 @@ const handleApprove = async (ctx) => {
     return res.json({ message: 'Transaction fully approved' });
   }
 
-  return res.status(400).json({ error: 'Transaction not eligible for approval' });
+  return res.status(400).json({ error: { bn: 'লেনদেন অনুমোদনের জন্য উপযুক্ত নয়।', en: 'Transaction not eligible for approval' } });
 };
 
 module.exports = { handleApprove };

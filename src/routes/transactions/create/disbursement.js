@@ -13,7 +13,7 @@ module.exports = async (ctx) => {
     include: { organization: { include: { books: { where: { isDefault: true } } } } }
   });
   if (!recipientMembership || recipientMembership.organization.books.length === 0) {
-    return res.status(400).json({ error: 'Recipient has no personal book' });
+    return res.status(400).json({ error: { bn: 'প্রাপকের কোনো ব্যক্তিগত বই নেই।', en: 'Recipient has no personal book' } });
   }
   const recipientBook = recipientMembership.organization.books[0];
 
@@ -34,7 +34,7 @@ module.exports = async (ctx) => {
       }
       const { remaining } = await getChainRemainingBalance(orgFundId);
       if (parsedAmount > remaining) {
-        return res.status(400).json({ error: `Insufficient fund balance: requested ${parsedAmount}, remaining ${remaining}` });
+        return res.status(400).json({ error: { bn: `অপর্যাপ্ত তহবিল ব্যালেন্স: অনুরোধকৃত ${parsedAmount}, অবশিষ্ট ${remaining}`, en: `Insufficient fund balance: requested ${parsedAmount}, remaining ${remaining}` } });
       }
       chainType = 'split';
     }

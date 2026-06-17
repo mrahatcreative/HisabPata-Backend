@@ -10,14 +10,14 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
     const txnId = req.params.id;
 
     const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
-    if (!txn) return res.status(404).json({ error: 'Transaction not found' });
+    if (!txn) return res.status(404).json({ error: { bn: 'লেনদেন পাওয়া যায়নি।', en: 'Transaction not found' } });
 
     if (txn.reconStatus === 'FROZEN') {
-      return res.status(422).json({ error: 'Frozen transaction cannot be deleted. Rejoin the organization to modify this entry.' });
+      return res.status(422).json({ error: { bn: 'ফ্রোজেন লেনদেন মুছে ফেলা যাবে না। পুনরায় সংগঠনে যোগ দিন।', en: 'Frozen transaction cannot be deleted. Rejoin the organization to modify this entry.' } });
     }
 
     const book = await prisma.book.findUnique({ where: { id: txn.bookId } });
-    if (!book) return res.status(404).json({ error: 'Book not found' });
+    if (!book) return res.status(404).json({ error: { bn: 'বই পাওয়া যায়নি।', en: 'Book not found' } });
 
     // ── Authorization: Who can delete? ──
     const isSender = txn.createdById === req.user.id;
@@ -31,27 +31,27 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
     if (isSend) {
       if (isPending) {
         if (isReceiver) {
-          return res.status(403).json({ error: 'Receiver cannot delete a pending transaction' });
+          return res.status(403).json({ error: { bn: 'প্রাপক অপেক্ষমাণ লেনদেন মুছে ফেলতে পারবেন না।', en: 'Receiver cannot delete a pending transaction' } });
         }
         if (!isSender && !isAdminOrEditor) {
-          return res.status(403).json({ error: 'Only the sender, admins, or editors can delete' });
+          return res.status(403).json({ error: { bn: 'শুধু প্রেরক, অ্যাডমিন বা এডিটর মুছে ফেলতে পারেন।', en: 'Only the sender, admins, or editors can delete' } });
         }
       } else if (isRejected) {
         if (!isSender && !isAdminOrEditor) {
-          return res.status(403).json({ error: 'Only the sender, admins, or editors can delete a rejected transaction' });
+          return res.status(403).json({ error: { bn: 'শুধু প্রেরক, অ্যাডমিন বা এডিটর প্রত্যাখ্যাত লেনদেন মুছে ফেলতে পারেন।', en: 'Only the sender, admins, or editors can delete a rejected transaction' } });
         }
       } else if (isApproved) {
         if (!isSender && !isReceiver && !isAdminOrEditor) {
-          return res.status(403).json({ error: 'Not authorized to delete this transaction' });
+          return res.status(403).json({ error: { bn: 'এই লেনদেন মুছে ফেলার অনুমতি নেই।', en: 'Not authorized to delete this transaction' } });
         }
       } else {
         if (!isAdminOrEditor) {
-          return res.status(403).json({ error: 'Only admins or editors can delete transactions' });
+          return res.status(403).json({ error: { bn: 'শুধু অ্যাডমিন বা এডিটর লেনদেন মুছে ফেলতে পারেন।', en: 'Only admins or editors can delete transactions' } });
         }
       }
     } else {
       if (!isAdminOrEditor) {
-        return res.status(403).json({ error: 'Only admins or editors can delete transactions' });
+        return res.status(403).json({ error: { bn: 'শুধু অ্যাডমিন বা এডিটর লেনদেন মুছে ফেলতে পারেন।', en: 'Only admins or editors can delete transactions' } });
       }
     }
 
@@ -68,7 +68,7 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
               where: { userId_organizationId: { userId: req.user.id, organizationId: linkedBook.organizationId } }
             });
             if (!membership || membership.status !== 'active') {
-              return res.status(403).json({ error: 'সংগঠন থেকে leave করার পর এই entry delete করা যাবে না। আবার জয়েন করুন।' });
+              return res.status(403).json({ error: { bn: 'সংগঠন থেকে leave করার পর এই entry delete করা যাবে না। আবার জয়েন করুন।', en: 'Cannot delete this entry after leaving the organization. Rejoin to modify.' } });
             }
           }
         }
@@ -78,7 +78,7 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true } });
     const org = bookOrg;
     if (txn.pendingAction) {
-      return res.status(400).json({ error: 'Transaction already has a pending action' });
+      return res.status(400).json({ error: { bn: 'লেনদেনটি ইতিমধ্যে একটি অপেক্ষমাণ কর্ম আছে।', en: 'Transaction already has a pending action' } });
     }
 
     // ── Determine delete type based on state ──
@@ -211,13 +211,13 @@ app.delete('/api/transactions/:id/permanent', authenticateToken, async (req, res
   try {
     const txnId = req.params.id;
     const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
-    if (!txn) return res.status(404).json({ error: 'Transaction not found' });
+    if (!txn) return res.status(404).json({ error: { bn: 'লেনদেন পাওয়া যায়নি।', en: 'Transaction not found' } });
 
     const book = await prisma.book.findUnique({ where: { id: txn.bookId } });
-    if (!book) return res.status(404).json({ error: 'Book not found' });
+    if (!book) return res.status(404).json({ error: { bn: 'বই পাওয়া যায়নি।', en: 'Book not found' } });
 
     if (!(await hasAdminOrEditorAccess(book.organizationId, req.user.id))) {
-      return res.status(403).json({ error: 'Only admins or editors can permanently delete transactions' });
+      return res.status(403).json({ error: { bn: 'শুধু অ্যাডমিন বা এডিটর স্থায়ীভাবে লেনদেন মুছে ফেলতে পারেন।', en: 'Only admins or editors can permanently delete transactions' } });
     }
 
     await prisma.$transaction(async (tx) => {

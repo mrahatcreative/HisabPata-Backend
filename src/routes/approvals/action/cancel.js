@@ -7,12 +7,12 @@ const handleCancel = async (ctx) => {
   const { createNotification, parsePendingData } = deps;
 
   if (!txn.pendingAction) {
-    return res.status(400).json({ error: 'There is no pending action to cancel on this transaction' });
+    return res.status(400).json({ error: { bn: 'এই লেনদেনে বাতিল করার মতো কোনো অপেক্ষমাণ কর্ম নেই।', en: 'There is no pending action to cancel on this transaction' } });
   }
 
   const pd = txn.pendingData;
   if (!pd || !book) {
-    return res.status(400).json({ error: 'Missing pending data or book' });
+    return res.status(400).json({ error: { bn: 'অপেক্ষমাণ ডেটা বা বই পাওয়া যায়নি।', en: 'Missing pending data or book' } });
   }
 
   const pdObj = parsePendingData(pd);
