@@ -34,7 +34,10 @@ app.put('/api/transactions/:id', authenticateToken, async (req, res) => {
     const isAdminOrEditor = await hasAdminOrEditorAccess(book.organizationId, req.user.id);
 
     if (isSend) {
-      // ── Block recipient change on any Send, regardless of state ──
+      // ── Block recipient & type change on any Send, regardless of state ──
+      if (type !== undefined && type !== txn.type) {
+        return res.status(400).json({ error: { bn: 'Send লেনদেনের ধরণ (type) পরিবর্তন করা যাবে না।', en: 'Cannot change transaction type on a Send transaction.' } });
+      }
       if (recipientUserId !== undefined && recipientUserId !== txn.recipientUserId) {
         return res.status(400).json({ error: { bn: 'Send লেনদেনের প্রাপক পরিবর্তন করা যাবে না।', en: 'Cannot change recipient on a Send transaction.' } });
       }

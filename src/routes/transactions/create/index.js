@@ -43,6 +43,9 @@ module.exports = function(app, deps) {
       const txnClientRef = clientRef || 'cr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
       const txnDateTime = parseClientDateTime(req.body.dateTime);
       const isSend = type === 'expense' && category === 'Send';
+      if (isSend && !recipientUserId && !recipientOrgId) {
+        return res.status(400).json({ error: { bn: 'Send লেনদেনের জন্য প্রাপক আবশ্যক।', en: 'Send transaction requires a recipient.' } });
+      }
       const isOrgSend = isSend && !!recipientOrgId;
       const isVoucher = !!orgFundId;
       const computedFundType = type === 'expense'

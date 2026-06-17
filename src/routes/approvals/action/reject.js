@@ -133,10 +133,11 @@ const handleReject = async (ctx) => {
             version: { increment: 1 }
           };
           // For delete: counterpart leg data was never modified during pending phase,
-          // only pendingAction/pendingData were set. Don't overwrite amount/type/category/note.
+          // only pendingAction/pendingData were set. Don't overwrite any fields.
+          // For edit: type was never in fieldUpdates — legPd.oldType is SOURCE's type,
+          // not counterpart's. Never restore type on counterpart legs.
           if (leg.pendingAction !== 'delete') {
             legRestoreData.amount = legPd.oldAmount;
-            legRestoreData.type = legPd.oldType;
             legRestoreData.category = legPd.oldCategory;
             legRestoreData.note = legPd.oldNote;
           }
