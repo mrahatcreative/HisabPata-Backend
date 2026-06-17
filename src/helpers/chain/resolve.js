@@ -96,7 +96,12 @@ const buildP1OrgApprovers = (chain, requesterId) => {
   const requesterIsOrg = chain.org.adminIds.includes(requesterId);
   if (requesterIsP1) {
     const rep = pickOrgRepresentative(chain.org.adminIds, requesterId);
-    return { requiredApprovers: rep ? [rep] : chain.org.adminIds.filter(id => id !== requesterId), orgApprovalAnyOf: chain.org.adminIds.filter(id => id !== requesterId), chainNote: 'degraded_p1_org' };
+    if (rep) {
+      return { requiredApprovers: [rep], orgApprovalAnyOf: chain.org.adminIds.filter(id => id !== requesterId), chainNote: 'degraded_p1_org' };
+    }
+    // Sender is the only admin of the org — keep them as required approver
+    // so the request goes through pending flow (not instant delete).
+    return { requiredApprovers: chain.org.adminIds, orgApprovalAnyOf: [], chainNote: 'degraded_p1_org' };
   }
   if (requesterIsOrg) {
     return {
@@ -329,6 +334,30 @@ const resolveChangeDeleteChain = async (txn, book) => {
       org: {
         active: !!org,
         hasEntry: !!orgEntry?.id && !!org,
+        adminIds: orgAdminIds,
+      },
+    };
+  }
+
+  // Fallback for Send to Org (personal book → org) when personalEntry wasn't set
+  // (e.g. old transactions without clientRef). Any admin of the recipient org
+  // can approve via orgApprovalAnyOf.
+  if (txn.recipientOrgId && !txn.recipientUserId) {
+    const org = await prisma.organization.findUnique({ where: { id: txn.recipientOrgId } });
+    const orgAdminIds = org ? await getOrgAdminUserIds(txn.recipientOrgId) : [];
+    const linked = txn.linkedTransactionId
+      ? await prisma.transaction.findUnique({ where: { id: txn.linkedTransactionId } })
+      : null;
+    return {
+      kind: 'p1_org',
+      p1: {
+        userId: txn.createdById,
+        active: await userStillActive(txn.createdById),
+        hasEntry: !!txn?.id,
+      },
+      org: {
+        active: !!org,
+        hasEntry: !!linked?.id,
         adminIds: orgAdminIds,
       },
     };
