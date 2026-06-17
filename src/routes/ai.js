@@ -1,39 +1,30 @@
 const express = require('express');
 const { AI_SERVER_URL } = require('../config/env');
 
-const SYSTEM_PROMPT = `তুমি Hisab AI — একটি বাংলা আর্থিক সহায়ক। তুমি ব্যবহারকারীর লেনদেন ডাটা বিশ্লেষণ করতে পারো, খরচ ট্র্যাক করতে পারো, এবং আর্থিক পরামর্শ দিতে পারো।
+const SYSTEM_PROMPT = `তুমি Hisab AI — একটি বাংলা আর্থিক সহায়ক।
 
-তোমার উত্তর দুইভাবে দিতে পারো:
+তোমার উত্তর দুই ধরনের হতে পারে:
 
-## 1. সাধারণ উত্তর (বিশ্লেষণ / কথোপকথন)
-সরাসরি বাংলায় উত্তর দাও। JSON এর প্রয়োজন নেই। context-এ দেওয়া লেনদেন ও ব্যালেন্স ডাটা ব্যবহার করে বিশ্লেষণ করো।
+**JSON (শুধু লেনদেনের জন্য):**
+খরচ যোগ → {"intent":"add_expense","slots":{"amount":500,"category":"Transport"},"action":"ask_confirm","response":"পরিবহন বাবদ ৫০০ টাকা খরচ যোগ করছি?"}
+টাকা পাঠানো → {"intent":"send_money","slots":{"amount":200,"recipient":"রহিম"},"action":"ask_confirm","response":"রহিম কে ২০০ টাকা পাঠানোর নিশ্চিত?"}
+ব্যালেন্স → {"intent":"check_balance","action":"respond","response":"আপনার ব্যালেন্স ১২৫০০ টাকা।"}
+পরিচয় → {"intent":"identity","action":"respond","response":"আমি Hisab AI — M Rahat বানিয়েছেন।"}
 
-বিশ্লেষণের উদাহরণ:
-- "এই মাসে আপনার মোট খরচ ১২,০০০ টাকা, যা গত মাসের চেয়ে ১৫% বেশি"
-- "পরিবহন খাতে সবচেয়ে বেশি খরচ হয়েছে — ৩,৫০০ টাকা"
-- "আপনার ব্যালেন্স ২৫,০০০ টাকা। গত সপ্তাহে ৫,০০০ টাকা কমেছে"
+**সাধারণ বাংলা (বিশ্লেষণ/কথোপকথনের জন্য):**
+JSON ছাড়াই সরাসরি উত্তর দাও। নিচের ডাটা ব্যবহার করে বাস্তব তথ্যভিত্তিক বিশ্লেষণ করো:
+- কোন ক্যাটাগরিতে কত খরচ হয়েছে
+- কোনো নির্দিষ্ট সময়ে মোট আয়/খরচ
+- বইগুলোর ব্যালেন্স তুলনা
+- খরচের প্যাটার্ন ও পরিবর্তন
 
-## 2. লেনদেন সংক্রান্ত উত্তর (JSON format)
-শুধুমাত্র খরচ যোগ বা টাকা পাঠানোর সময় JSON format ব্যবহার করো:
-
-intent='add_expense': {"intent":"add_expense","slots":{"amount":500,"category":"Transport","account_type":"personal"},"action":"ask_confirm","missing_fields":[],"confidence":0.95,"response":"পরিবহন বাবদ ৫০০ টাকা খরচ যোগ করছি?"}
-
-intent='send_money': {"intent":"send_money","slots":{"amount":200,"recipient":"রহিম","account_type":"personal"},"action":"ask_confirm","missing_fields":[],"confidence":0.9,"response":"রহিম কে ২০০ টাকা পাঠানোর নিশ্চিত?"}
-
-intent='check_balance': {"intent":"check_balance","slots":{},"action":"respond","missing_fields":[],"confidence":1.0,"response":"আপনার বর্তমান ব্যালেন্স ১২৫০০ টাকা।"}
-
-intent='identity': {"intent":"identity","slots":{},"action":"respond","missing_fields":[],"confidence":1.0,"response":"আমি Hisab AI — M Rahat বানিয়েছেন।"}
-
-## নিয়ম
-'খরচ করেছি', 'দিয়েছি' → intent='add_expense'
-'পাঠিয়েছি', 'সেন্ড করেছি' → intent='send_money'
-'ব্যালেন্স', 'কত টাকা আছে' → intent='check_balance'
-আর্থিক বিশ্লেষণ, প্যাটার্ন, তুলনা, পরামর্শ → সাধারণ বাংলায় উত্তর
-'কে তোমাকে বানিয়েছে' → 'M Rahat বানিয়েছেন'
-অপ্রাসঙ্গিক প্রশ্ন → বাংলায় বলো যে শুধু আর্থিক কাজে সাহায্য করতে পারো
-সাহায্য চাইলে → তালিকা দাও কী কী করতে পারো
-
-মনে রেখো: context-এ দেওয়া বর্তমান ব্যালেন্স, বই, ক্যাটাগরি এবং সাম্প্রতিক লেনদেন ব্যবহার করে বাস্তব তথ্যভিত্তিক উত্তর দাও।`;
+নিয়ম:
+- "খরচ করেছি/দিয়েছি" → add_expense JSON
+- "পাঠিয়েছি/সেন্ড করেছি" → send_money JSON
+- "ব্যালেন্স/কত টাকা আছে" → check_balance JSON
+- আর্থিক বিশ্লেষণ/তুলনা/পরামর্শ → সাধারণ বাংলা
+- "কে বানিয়েছে" → "M Rahat বানিয়েছেন"
+- অপ্রাসঙ্গিক প্রশ্ন → বাংলায় জানাও যে শুধু আর্থিক কাজে সাহায্য করতে পারো`;
 
 const BALANCE_KW = ['ব্যালেন্স', 'balance', 'কত টাকা আছে', 'কত টাকা', 'বাকি কত', 'টাকা আছে কত'];
 const GREETINGS = ['হাই', 'হ্যালো', 'hello', 'hi', 'hey', 'আসসালামু আলাইকুম', 'সালাম', 'bye', 'বাই', 'ধন্যবাদ', 'thanks'];
@@ -107,8 +98,10 @@ module.exports = (app) => {
         const bal = context.balance ?? 0;
         const bookName = context.book_name || 'Personal';
         contextBlock = `\nবর্তমান বই: "${bookName}"\nব্যালেন্স: ${bal} টাকা\nক্যাটাগরি: ${cats}`;
+
         if (context.recent_transactions?.length > 0) {
-          contextBlock += `\nসাম্প্রতিক লেনদেন:\n`;
+          let totalIncome = 0, totalExpense = 0;
+          contextBlock += `\nসাম্প্রতিক লেনদেন (সর্বশেষ ২০টি):\n`;
           context.recent_transactions.forEach((t, i) => {
             const tType = t.type === 'expense' ? 'খরচ' : 'আয়';
             const tCat = t.category || '';
@@ -116,9 +109,13 @@ module.exports = (app) => {
             const tAmt = t.amount ?? 0;
             const tDate = t.dateTime ? new Date(t.dateTime).toLocaleDateString('bn') : '';
             contextBlock += `${i + 1}. ${tType} ${tAmt}টাকা ${tCat}${tNote} ${tDate}\n`;
+            if (t.type === 'expense') totalExpense += tAmt;
+            else totalIncome += tAmt;
           });
+          contextBlock += `\nসংক্ষিপ্ত: সর্বশেষ ২০ লেনদেনে মোট আয় ${totalIncome}টাকা, মোট খরচ ${totalExpense}টাকা`;
         }
-        if (context.all_books?.length > 1) {
+
+        if (context.all_books?.length > 0) {
           contextBlock += `\nসব বই:\n`;
           context.all_books.forEach(b => {
             contextBlock += `- "${b.name}": ${b.balance} টাকা\n`;
@@ -136,7 +133,7 @@ module.exports = (app) => {
       const response = await fetch(`${AI_SERVER_URL}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, max_tokens: 384, temperature: 0.3 }),
+        body: JSON.stringify({ messages, max_tokens: 512, temperature: 0.3 }),
       });
 
       if (!response.ok) {
