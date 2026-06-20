@@ -9,11 +9,12 @@ services:
       - NODE_ENV=${NODE_ENV:-production}
       - PORT=8000
       - ADMIN_KEY=${ADMIN_KEY}
-      - STORAGE_S3_ENDPOINT=${STORAGE_S3_ENDPOINT:-}
-      - STORAGE_S3_BUCKET=${STORAGE_S3_BUCKET:-hisabpata}
-      - STORAGE_S3_ACCESS_KEY=${STORAGE_S3_ACCESS_KEY:-}
-      - STORAGE_S3_SECRET_KEY=${STORAGE_S3_SECRET_KEY:-}
-      - STORAGE_S3_REGION=${STORAGE_S3_REGION:-us-east-1}
+      - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-}
+      - AWS_BUCKET=${AWS_BUCKET:-hisabpata}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_FORCE_PATH_STYLE=${AWS_FORCE_PATH_STYLE:-true}
       - AI_SERVER_URL=${AI_SERVER_URL:-http://llama-ai:8080}
     networks:
       - default

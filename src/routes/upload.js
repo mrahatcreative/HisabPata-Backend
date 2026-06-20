@@ -27,7 +27,7 @@ app.post('/api/upload', authenticateToken, (req, res) => {
       } else {
         console.error('[Upload] S3 enabled but upload failed; file kept at', req.file.path);
         return res.status(502).json({
-          error: 'Cloud storage upload failed. Check STORAGE_S3_* settings on the server.',
+          error: 'Cloud storage upload failed. Check AWS_* settings on the server.',
         });
       }
     }

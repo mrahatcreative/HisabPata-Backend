@@ -1,11 +1,12 @@
 require('dotenv').config();
 
-const s3Endpoint  = process.env.STORAGE_S3_ENDPOINT  ? process.env.STORAGE_S3_ENDPOINT.replace(/\/$/, '') : '';
-const s3Bucket    = process.env.STORAGE_S3_BUCKET    || 'hisabpata';
-const s3AccessKey = (process.env.STORAGE_S3_ACCESS_KEY || '').trim();
-const s3SecretKey = (process.env.STORAGE_S3_SECRET_KEY || '').trim();
-const s3Region    = process.env.STORAGE_S3_REGION     || 'us-east-1';
-const s3ForcePathStyle = process.env.STORAGE_S3_FORCE_PATH_STYLE !== 'false';
+const rawEndpoint = process.env.AWS_ENDPOINT_URL || '';
+const s3Endpoint  = rawEndpoint ? rawEndpoint.replace(/\/$/, '') : '';
+const s3Bucket    = process.env.AWS_BUCKET || 'hisabpata';
+const s3AccessKey = (process.env.AWS_ACCESS_KEY_ID || '').trim();
+const s3SecretKey = (process.env.AWS_SECRET_ACCESS_KEY || '').trim();
+const s3Region    = process.env.AWS_REGION || 'us-east-1';
+const s3ForcePathStyle = process.env.AWS_FORCE_PATH_STYLE !== 'false';
 const useS3       = !!s3Endpoint;
 
 const PORT = process.env.PORT || 8000;
